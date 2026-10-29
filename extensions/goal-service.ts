@@ -276,6 +276,15 @@ export class GoalService {
 		this.ref = ref;
 	}
 
+	private reportLedgerSpecError(goalId: string, error: unknown): void {
+		this.ref.onDiagnostic({
+			severity: "warning",
+			source: "ledger",
+			goalId,
+			message: `Ledger spec error during goal mutation: ${String(error)}`,
+		});
+	}
+
 	/** Record the usage value the focused goal's in-memory accounting builds on. */
 	private trackBaseline(goalId: string, usage: GoalUsage): void {
 		this.lastPersistedUsage = { goalId, tokensUsed: usage.tokensUsed, activeSeconds: usage.activeSeconds };
@@ -486,8 +495,9 @@ export class GoalService {
 				try {
 					const events = typeof spec.ledger === "function" ? spec.ledger(mutated) : spec.ledger;
 					this.turn.ledger.push(...events);
-				} catch {
-					// Ledger spec error: nothing appended (same swallow as the write path).
+				} catch (err) {
+					// Nothing is appended, but the lost events must stay observable.
+					this.reportLedgerSpecError(mutated.id, err);
 				}
 			}
 			this.turn.goal = mutated;
@@ -534,8 +544,10 @@ export class GoalService {
 				let events: GoalLedgerEvent[];
 				try {
 					events = typeof spec.ledger === "function" ? spec.ledger(written) : spec.ledger;
-				} catch {
+				} catch (err) {
+					// The authoritative write stands; the lost events must stay observable.
 					events = [];
+					this.reportLedgerSpecError(written.id, err);
 				}
 				this.appendLedgerEventsBestEffort(ctx, events);
 			}
