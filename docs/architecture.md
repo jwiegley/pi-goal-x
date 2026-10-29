@@ -347,6 +347,17 @@ is claimed and removed, and a successor that appeared meanwhile is restored
 rather than deleted. A cold pool read serves the derived snapshot only when the
 goals directory is unchanged since it was written.
 
+Per-goal locks under `.pi/goals/.locks` record the owner's pid and a random
+token. Creating a lock and recovering a stale one are serialized by a
+short-lived ownership gate created the same way; a contender that finds a live
+owner just waits, so contention costs one checked read per attempt. A lock is
+stale only when its owner pid is dead or its payload is malformed: a live owner
+keeps its lock however long it holds it. Release removes the lock only after its inode, token and bytes match
+what the holder wrote, so a successor's lock is never deleted, and a release
+that fails after a committed mutation is reported without turning the mutation
+into a failure. A gate abandoned by a crash fails closed; `/goal-recovery`
+reports it for removal by hand once every Goal X session has stopped.
+
 This contract assumes a stable, private, user-owned project directory and
 cooperating Goal X instances. Node exposes no `openat`/`renameat`/`unlinkat` or
 conditional final-name operation, so protection against a hostile same-user

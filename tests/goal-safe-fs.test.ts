@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
@@ -22,6 +23,7 @@ import {
 	claimRegularFile,
 	discardClaimedRegularFile,
 	ensureSafeDirectory,
+	ProtectedFileChangedError,
 	readRegularFile,
 	readRegularFileAsync,
 	restoreClaimedRegularFile,
@@ -61,6 +63,28 @@ test("reads are bounded regular files below the root, never through symlinks or 
 		execFileSync("mkfifo", [path.join(root, ".pi/goals/fifo.md")]);
 		assert.throws(() => readRegularFile(root, path.join(root, ".pi/goals/fifo.md"), 64), /not a regular file/);
 	}
+});
+
+test("a file renamed away while it is read is reported as a concurrent change", t => {
+	const root = project(t);
+	const file = path.join(root, "owner.json");
+	fs.writeFileSync(file, "{\"pid\":1}");
+	const mutableFs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+	const readSync = mutableFs.readSync;
+	let renamed = false;
+	mutableFs.readSync = ((...args: unknown[]) => {
+		// Another process claims the file between this reader's open and its read.
+		if (!renamed) { renamed = true; fs.renameSync(file, `${file}.claimed`); }
+		return (readSync as (...rest: unknown[]) => number)(...args);
+	}) as typeof mutableFs.readSync;
+	syncBuiltinESMExports();
+	try {
+		assert.throws(() => readRegularFile(root, file, 1024), (error: unknown) => error instanceof ProtectedFileChangedError || (error as NodeJS.ErrnoException).code === "ENOENT");
+	} finally {
+		mutableFs.readSync = readSync;
+		syncBuiltinESMExports();
+	}
+	assert.equal(renamed, true);
 });
 
 test("directories are created privately one component at a time and symlinked components are refused", t => {

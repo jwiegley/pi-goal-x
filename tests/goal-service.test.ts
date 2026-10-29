@@ -6,7 +6,7 @@
  *   → 4. active-file write → 5. ledger append → 6. memory commit → 7. effects
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -610,6 +610,68 @@ describe("cross-process mutation control (follow-up Stage 4)", () => {
 			const again = acquireGoalLock({ cwd: f.cwd }, f.written.id, { attempts: 3 });
 			again.release();
 		} finally {
+			f.cleanup();
+		}
+	});
+
+	it("a task update raced by another writer retries after releasing its own lock", () => {
+		const f = fixture();
+		try {
+			const seeded = f.service.apply({ cwd: f.cwd }, {
+				reconcile: false,
+				mutate: (g) => ({
+					...g,
+					taskList: { tasks: [{ id: "t1", title: "Raced task", status: "pending" as const }], blockCompletion: false, proposedAt: new Date().toISOString() },
+				}),
+			});
+			assert.ok(seeded.ok);
+			// Another process writes between this session's reconcile and its lock.
+			const reconciled = f.ref.onReconciled;
+			let raced = false;
+			f.ref.onReconciled = (goal) => {
+				reconciled(goal);
+				if (raced) return;
+				raced = true;
+				const disk = parseGoalFile(path.join(f.cwd, f.written.activePath!))!;
+				writeActiveGoalFile({ cwd: f.cwd }, { ...disk, objective: "Edited elsewhere", revision: (disk.revision ?? 0) + 1 });
+			};
+			const result = f.service.updateTask({ cwd: f.cwd }, {
+				taskId: "t1",
+				validate: (task) => task.status === "pending" ? { ok: true as const } : { ok: false as const, message: "not pending" },
+				update: (task) => ({ ...task, status: "complete" as const, completedAt: new Date().toISOString() }),
+			});
+			assert.equal(raced, true);
+			assert.equal(result.ok, true, result.ok ? "" : result.message);
+			const disk = parseGoalFile(path.join(f.cwd, f.written.activePath!))!;
+			assert.equal(disk.taskList?.tasks[0]?.status, "complete");
+			assert.equal(disk.objective, "Edited elsewhere", "the retry builds on the other writer's record");
+			assert.equal(disk.revision, (seeded.ok ? seeded.goal.revision ?? 0 : 0) + 2);
+			assert.deepEqual(readdirNames(path.join(f.cwd, ".pi", "goals", ".locks")), [], "both attempts released the lock");
+		} finally {
+			f.cleanup();
+		}
+	});
+
+	it("a lock that cannot be released after a committed write is reported, not thrown", { skip: process.platform === "win32" || process.getuid?.() === 0 }, () => {
+		const f = fixture();
+		const locks = path.join(f.cwd, ".pi", "goals", ".locks");
+		try {
+			const result = f.service.apply({ cwd: f.cwd }, {
+				reconcile: false,
+				mutate: (g) => {
+					// Release must claim the lock inside this directory; make that fail.
+					chmodSync(locks, 0o500);
+					return { ...g, objective: "Committed before release" };
+				},
+			});
+			chmodSync(locks, 0o700);
+			assert.equal(result.ok, true, "the committed mutation is not reported as failed");
+			assert.equal(parseGoalFile(path.join(f.cwd, f.written.activePath!))!.objective, "Committed before release");
+			const lockDiagnostics = f.log.diagnostics.filter((d) => d.source === "lock");
+			assert.equal(lockDiagnostics.length, 1);
+			assert.match(lockDiagnostics[0]!.message, /release failed after the operation completed/);
+		} finally {
+			try { chmodSync(locks, 0o700); } catch {}
 			f.cleanup();
 		}
 	});

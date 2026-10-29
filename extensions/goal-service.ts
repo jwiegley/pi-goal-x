@@ -17,7 +17,7 @@ import {
 	type GoalFileContext,
 	type GoalFileSnapshot,
 } from "./storage/goal-files.ts";
-import { acquireGoalLock, type GoalLock } from "./storage/goal-lock.ts";
+import { acquireGoalLock, withGoalLock, type GoalLock } from "./storage/goal-lock.ts";
 import { mergeFocusedGoalWithDisk } from "./goal-pool.ts";
 
 /**
@@ -29,7 +29,7 @@ import { mergeFocusedGoalWithDisk } from "./goal-pool.ts";
  */
 export interface GoalDiagnostic {
 	severity: "warning";
-	source: "ledger" | "storage";
+	source: "ledger" | "storage" | "lock";
 	goalId?: string;
 	eventType?: string;
 	message: string;
@@ -53,7 +53,7 @@ export interface GoalServiceRef {
 	onReconciled(goal: GoalRecord): void;
 	/** The session focus changed; clear continuation/accounting/nudge state. */
 	onFocusChanged(from: string | null, to: string | null): void;
-	/** Observable diagnostic sink for non-fatal failures (ledger appends). */
+	/** Observable diagnostic sink for non-fatal failures (ledger appends, lock release). */
 	onDiagnostic(diagnostic: GoalDiagnostic): void;
 }
 
@@ -217,7 +217,7 @@ export class GoalService {
 			// boundary can retry it instead of silently losing the mutation.
 			return null;
 		}
-		try {
+		return this.runUnderGoalLock(lock, goal.id, () => {
    const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, goal);
    const freshDisk = freshSnapshot?.goal ?? null;
    const expected = this.turnBase ?? goal;
@@ -253,9 +253,7 @@ export class GoalService {
 			if (this.ref.getFocusedGoalId() === written.id) this.ref.setFocused(written);
 			else this.ref.getPool().set(written.id, written);
 			return written;
-		} finally {
-			lock.release();
-		}
+		});
 	}
 
 	/** Completion must never audit state that failed to flush. */
@@ -319,6 +317,25 @@ export class GoalService {
 				: `Ledger batch append failed for ${events.length} events; the ambiguous batch was not retried: ${String(append.error)}`,
 		});
 		return false;
+	}
+
+	private reportGoalLockReleaseFailure(goalId: string, error: unknown): void {
+		this.ref.onDiagnostic({
+			severity: "warning",
+			source: "lock",
+			goalId,
+			message: `Goal lock release failed after the operation completed; its result was preserved: ${error instanceof Error ? error.message : String(error)}`,
+		});
+	}
+
+	/**
+	 * Run a critical section under an acquired goal lock. A completed result
+	 * survives a failed release (reported, not thrown, so the caller never
+	 * retries a committed mutation); a failed body and a failed release are
+	 * both surfaced.
+	 */
+	private runUnderGoalLock<T>(lock: GoalLock, goalId: string, body: () => T): T {
+		return withGoalLock(lock, body, (error) => this.reportGoalLockReleaseFailure(goalId, error));
 	}
 
 	/** Safe focused record reconciliation from disk. */
@@ -490,7 +507,7 @@ export class GoalService {
 		// 2b. exclusive per-goal lock + optimistic revision check (follow-up Stage 4).
 		const capturedRevision = current.revision ?? 0;
 		const lock = acquireGoalLock(ctx, current.id);
-		try {
+		return this.runUnderGoalLock(lock, current.id, (): GoalMutationOutcome => {
 			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, current);
 			const freshDisk = freshSnapshot?.goal ?? null;
 			if (!freshSnapshot || !freshDisk) {
@@ -537,9 +554,7 @@ export class GoalService {
 			if (focusChanged) this.ref.onFocusChanged(previousGoalId, written.id);
 
 			return { ok: true, goal: written, previousGoalId, goalId, focusChanged };
-		} finally {
-			lock.release();
-		}
+		});
 	}
 
 
@@ -614,11 +629,9 @@ export class GoalService {
   if (!this.reconcileFocused(ctx)) return {ok: false, message: "No focused goal to mutate."};
  const current = this.ref.getFocused();
   if (!current?.taskList) return {ok: false, message: "The goal has no task list."};
-  let lock: GoalLock | undefined;
-  try {
+  const run = (): GoalMutationOutcome => {
   let base = current;
   if (!this.turn.active) {
-   lock = acquireGoalLock(ctx, current.id);
    const fresh = this.readFreshDiskGoal(ctx, current);
    if (!fresh || (fresh.revision ?? 0) !== (current.revision ?? 0)) return {ok: false, message: "The goal changed in another process; no updates applied. Refresh and retry."};
    if (fresh.status !== "active" || !fresh.taskList) return {ok: false, message: "The persisted goal is no longer active with tasks; no updates applied."};
@@ -660,7 +673,10 @@ export class GoalService {
   this.trackBaseline(written.id, written.usage);
   this.ref.setFocused(written);
   return {ok: true, goal: written, previousGoalId: current.id, goalId: written.id, focusChanged: false};
-  } finally { lock?.release(); }
+  };
+  // Within a turn the buffered apply below takes no lock.
+  if (this.turn.active) return run();
+  return this.runUnderGoalLock(acquireGoalLock(ctx, current.id), current.id, run);
  }
 
 	/**
@@ -689,7 +705,10 @@ export class GoalService {
 		}
 		const capturedRevision = current.revision ?? 0;
 		const lock = acquireGoalLock(ctx, current.id);
-		try {
+		let retryRequested = false;
+		let retryReleaseFailed = false;
+		let retryReleaseError: unknown;
+		const outcome = withGoalLock<GoalTaskUpdateOutcome | null>(lock, () => {
 			const freshDisk = this.readFreshDiskGoal(ctx, current);
 			if (!freshDisk) {
 				return { ok: false, message: `Goal ${current.id} was deleted or archived by another process while the task update was in progress; the task was not updated.` };
@@ -698,8 +717,11 @@ export class GoalService {
 			if (diskRevision !== capturedRevision) {
 				if (retriesLeft > 0) {
 					// Retry once against the fresh state; the transition validation
-					// below is the guard for task status/structure changes.
-					return this.updateTaskAttempt(ctx, spec, retriesLeft - 1);
+					// below is the guard for task status/structure changes. The retry
+					// runs after this lock is released: re-acquiring it here would
+					// wait on this process's own live lock and time out.
+					retryRequested = true;
+					return null;
 				}
 				return { ok: false, message: `Goal ${current.id} was modified by another process (revision ${capturedRevision} -> ${diskRevision}); current revision is ${diskRevision}. The task was not updated.` };
 			}
@@ -743,9 +765,16 @@ export class GoalService {
 			}
 			this.ref.setFocused(written);
 			return { ok: true, goal: written, task: updatedTask };
-		} finally {
-			lock.release();
-		}
+		}, (error) => {
+			// Nothing was written when a retry was requested, so a failed release
+			// is thrown rather than retried over a lock this process may still hold.
+			if (retryRequested) {
+				retryReleaseFailed = true;
+				retryReleaseError = error;
+			} else this.reportGoalLockReleaseFailure(current.id, error);
+		});
+		if (retryReleaseFailed) throw retryReleaseError;
+		return retryRequested ? this.updateTaskAttempt(ctx, spec, retriesLeft - 1) : outcome!;
 	}
 
 	/**
@@ -775,7 +804,7 @@ export class GoalService {
 			// Another writer holds the goal lock; skip this persist tick.
 			return null;
 		}
-		try {
+		return this.runUnderGoalLock(lock, current.id, () => {
 			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, current);
 			const freshDisk = freshSnapshot?.goal ?? null;
 			if (!freshSnapshot || !freshDisk) return null;
@@ -804,9 +833,7 @@ export class GoalService {
 			this.trackBaseline(written.id, written.usage);
 			this.ref.setFocused(written);
 			return written;
-		} finally {
-			lock.release();
-		}
+		});
 	}
 
 	/** Create a goal: write active file → ledger → memory/focus commit. */

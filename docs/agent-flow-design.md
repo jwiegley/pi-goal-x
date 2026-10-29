@@ -277,8 +277,10 @@ goal.ts (thin installer)
   being resurrected.
 - **Cross-process mutations are serialized.** Each goal carries a persisted
   monotonic `revision` (missing historical values normalize to zero). A
-  short per-goal filesystem lock (atomic create under `.pi/goals/.locks` with
-  bounded acquisition and stale-lock recovery) guards reads, and
+  short per-goal filesystem lock (exclusive create under `.pi/goals/.locks`,
+  carrying the owner's pid and a random token, with bounded acquisition; a
+  lock is recovered only when its owner is dead or its payload malformed,
+  never for its age, and only its own holder removes it) guards reads, and
   `GoalService.apply` re-reads the authoritative file under the lock: a stale
   writer receives a typed conflict carrying the current revision instead of
   overwriting blindly. `update_goal_task` retries once only when the same task

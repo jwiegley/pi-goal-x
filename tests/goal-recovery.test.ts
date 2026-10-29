@@ -145,6 +145,44 @@ test("recovery repair: confirmed repair backs up, removes stale locks, and refre
 	}
 });
 
+test("recovery leaves a live owner's lock alone however old it is", async () => {
+	const ctx = tempCtx();
+	try {
+		writeGoal(ctx);
+		const lockPath = path.join(ctx.cwd, GOALS_DIR, ".locks", "g1.lock");
+		fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: new Date(Date.now() - 60 * 60_000).toISOString() }), "utf8");
+		writeStaleLock(ctx, "g2.lock");
+		const report = runRecoveryReport(ctx);
+		assert.deepEqual(report.staleLocks.map((lock) => lock.fileName), ["g2.lock"], "age alone does not make a lock stale");
+		// The g2 owner came back before the repair ran.
+		fs.writeFileSync(path.join(ctx.cwd, GOALS_DIR, ".locks", "g2.lock"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), "utf8");
+		const result = await runRecoveryRepair(ctx, report, async () => true);
+		assert.deepEqual(result.applied, [], "a lock that is no longer stale is not removed");
+		assert.ok(fs.existsSync(lockPath));
+		assert.ok(fs.existsSync(path.join(ctx.cwd, GOALS_DIR, ".locks", "g2.lock")));
+	} finally {
+		cleanup(ctx);
+	}
+});
+
+test("recovery reports an abandoned ownership gate and never removes it", async () => {
+	const ctx = tempCtx();
+	try {
+		writeGoal(ctx);
+		writeStaleLock(ctx, "g1.lock.gate");
+		const report = runRecoveryReport(ctx);
+		assert.equal(report.healthy, false);
+		assert.deepEqual(report.staleLocks, []);
+		assert.deepEqual(report.abandonedGates.map((gate) => gate.fileName), ["g1.lock.gate"]);
+		assert.match(formatRecoveryReport(report), /abandoned lock ownership gate[\s\S]*delete each gate by hand/);
+		const result = await runRecoveryRepair(ctx, report, async () => true);
+		assert.equal(result.confirmed, false, "there is nothing repair may do");
+		assert.ok(fs.existsSync(path.join(ctx.cwd, GOALS_DIR, ".locks", "g1.lock.gate")));
+	} finally {
+		cleanup(ctx);
+	}
+});
+
 test("recovery report: never appends ledger events or rewrites goal files", () => {
 	const ctx = tempCtx();
 	try {

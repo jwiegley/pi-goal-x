@@ -6,13 +6,18 @@ import { commandPaths, type GoalCommands } from "./goal-controls.ts";
  * Reliability campaign 2026-08-09. The report scans four failure classes:
  *   - malformed goal files (active_goal_*.md that do not parse);
  *   - malformed ledger lines (counted by the ledger reader);
- *   - stale locks (.pi/goals/.locks/*.lock whose pid is dead or whose age
- *     exceeds the TTL — left behind by crashed sessions);
+ *   - stale locks and ownership gates (.pi/goals/.locks/* whose owner pid is
+ *     dead or whose payload is malformed — left behind by crashed sessions;
+ *     a live owner is never stale, however old its lock);
  *   - orphaned snapshot data (pool-snapshot goals with no matching file).
  *
  * Everything is read-only by default. Repair operations (stale-lock removal,
  * snapshot refresh) require an explicit confirmation AND copy the affected
- * files into a timestamped backup directory first. Malformed goal files and
+ * files into a timestamped backup directory first. A stale lock is removed
+ * only under its ownership gate after its bytes and identity revalidate.
+ * Abandoned gates are reported but never removed automatically: removing the
+ * guard safely would itself need a guard, so they are an offline repair once
+ * every Goal X writer has stopped. Malformed goal files and
  * malformed ledger lines are reported but never rewritten automatically —
  * rewriting user-owned data is deliberately out of scope (and automatic
  * ledger rewriting is a documented non-goal of the reliability campaign).
@@ -21,7 +26,7 @@ import { commandPaths, type GoalCommands } from "./goal-controls.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { readGoalLedger } from "./goal-ledger.ts";
-import { GOAL_LOCK_DIR } from "./storage/goal-lock.ts";
+import { GOAL_LOCK_DIR, inspectGoalLock, inspectGoalLockGate, recoverStaleGoalLock } from "./storage/goal-lock.ts";
 import { invalidateGoalPoolCache, parseGoalFile, readActiveGoalPool, type GoalFileContext } from "./storage/goal-files.ts";
 
 export const GOALS_DIR = ".pi/goals";
@@ -49,6 +54,7 @@ export interface RecoveryReport {
 	malformedGoalFiles: MalformedGoalFileEntry[];
 	malformedLedgerLines: number;
 	staleLocks: StaleLockEntry[];
+	abandonedGates: StaleLockEntry[];
 	orphanedSnapshotGoals: OrphanedSnapshotEntry[];
 	healthy: boolean;
 }
@@ -59,20 +65,8 @@ export interface RecoveryRepairResult {
 	confirmed: boolean;
 }
 
-const LOCK_STALE_TTL_MS = 30_000;
-
 function safeLockName(goalId: string): string {
 	return goalId.replace(/[^A-Za-z0-9._-]/g, "_");
-}
-
-function pidAlive(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (err) {
-		return (err as NodeJS.ErrnoException).code === "EPERM";
-	}
 }
 
 function goalsDir(ctx: GoalFileContext): string {
@@ -104,32 +98,37 @@ function scanMalformedGoalFiles(ctx: GoalFileContext): MalformedGoalFileEntry[] 
 	return out;
 }
 
-/** Scan the lock dir for lock files whose pid is dead or whose age exceeds the TTL. */
-function scanStaleLocks(ctx: GoalFileContext): StaleLockEntry[] {
-	const dir = locksDir(ctx);
-	const out: StaleLockEntry[] = [];
-	let names: string[];
+function lockDirNames(ctx: GoalFileContext): string[] {
 	try {
-		names = fs.readdirSync(dir);
+		return fs.readdirSync(locksDir(ctx));
 	} catch {
-		return out;
+		return [];
 	}
-	const now = Date.now();
-	for (const name of names) {
-		if (!name.endsWith(".lock")) continue;
-		try {
-			const raw = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as { pid?: unknown; startedAt?: unknown };
-			const pid = typeof raw.pid === "number" ? raw.pid : 0;
-			const startedAt = typeof raw.startedAt === "string" ? raw.startedAt : "";
-			const startedMs = new Date(startedAt).getTime();
-			const ageMs = Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : now;
-			if (!pidAlive(pid) || ageMs > LOCK_STALE_TTL_MS) {
-				out.push({ fileName: name, pid, startedAt, ageMs });
-			}
-		} catch {
-			// Unreadable lock body: report as stale (pid unknown).
-			out.push({ fileName: name, pid: 0, startedAt: "", ageMs: now });
-		}
+}
+
+/**
+ * Locks whose owner pid is dead or whose payload is malformed. Each lock is
+ * read through the checked file boundary; a symlinked or non-regular lock
+ * fails the report instead of being followed.
+ */
+function scanStaleLocks(ctx: GoalFileContext): StaleLockEntry[] {
+	const out: StaleLockEntry[] = [];
+	for (const name of lockDirNames(ctx)) {
+		// Only names acquireGoalLock can create; anything else is not a goal lock.
+		if (!/^[A-Za-z0-9._-]+\.lock$/.test(name)) continue;
+		const stale = inspectGoalLock(ctx, name);
+		if (stale) out.push({ fileName: name, pid: stale.pid, startedAt: stale.startedAt, ageMs: stale.ageMs });
+	}
+	return out;
+}
+
+/** Ownership gates left behind by a crashed acquisition; these fail closed. */
+function scanAbandonedGates(ctx: GoalFileContext): StaleLockEntry[] {
+	const out: StaleLockEntry[] = [];
+	for (const name of lockDirNames(ctx)) {
+		if (!/^[A-Za-z0-9._-]+\.lock\.gate$/.test(name)) continue;
+		const stale = inspectGoalLockGate(ctx, name);
+		if (stale) out.push({ fileName: name, pid: stale.pid, startedAt: stale.startedAt, ageMs: stale.ageMs });
 	}
 	return out;
 }
@@ -166,23 +165,26 @@ export function runRecoveryReport(ctx: GoalFileContext): RecoveryReport {
 	const ledger = readGoalLedger(ctx, { maxEvents: 1 });
 	const malformedGoalFiles = scanMalformedGoalFiles(ctx);
 	const staleLocks = scanStaleLocks(ctx);
+	const abandonedGates = scanAbandonedGates(ctx);
 	const orphanedSnapshotGoals = scanOrphanedSnapshotGoals(ctx);
 	return {
 		scannedAt: new Date().toISOString(),
 		malformedGoalFiles,
 		malformedLedgerLines: ledger.malformed,
 		staleLocks,
+		abandonedGates,
 		orphanedSnapshotGoals,
-		healthy: malformedGoalFiles.length === 0 && ledger.malformed === 0 && staleLocks.length === 0 && orphanedSnapshotGoals.length === 0,
+		healthy: malformedGoalFiles.length === 0 && ledger.malformed === 0 && staleLocks.length === 0 && abandonedGates.length === 0 && orphanedSnapshotGoals.length === 0,
 	};
 }
 
 /**
  * Apply the safe repair operations with confirmation + backup.
  *
- * Repairs: stale-lock removal (backed up then unlinked) and pool-snapshot
- * refresh (backed up then rewritten from a fresh scan). Returns what was
- * applied. When `confirm` rejects, nothing is touched.
+ * Repairs: stale-lock removal (backed up, revalidated under the lock's
+ * ownership gate, then removed) and pool-snapshot refresh (backed up then
+ * rewritten from a fresh scan). Returns what was applied. When `confirm`
+ * rejects, nothing is touched.
  */
 export async function runRecoveryRepair(
 	ctx: GoalFileContext,
@@ -201,10 +203,11 @@ export async function runRecoveryRepair(
 	const applied: string[] = [];
 
 	for (const lock of report.staleLocks) {
-		const source = path.join(locksDir(ctx), lock.fileName);
 		try {
-			fs.copyFileSync(source, path.join(backupDir, `lock-${safeLockName(lock.fileName)}`));
-			fs.unlinkSync(source);
+			// Refused when the owner came back to life or the lock changed since the report.
+			recoverStaleGoalLock(ctx, lock.fileName, (bytes) => {
+				fs.writeFileSync(path.join(backupDir, `lock-${safeLockName(lock.fileName)}`), bytes, { flag: "wx" });
+			});
 			applied.push(`removed stale lock ${lock.fileName}`);
 		} catch {
 			// best-effort per item
@@ -243,6 +246,11 @@ export function formatRecoveryReport(report: RecoveryReport, commands?: GoalComm
 	if (report.staleLocks.length > 0) {
 		lines.push(`  - ${report.staleLocks.length} stale lock(s):`);
 		for (const l of report.staleLocks) lines.push(`      ${l.fileName} (pid ${l.pid}, ${Math.round(l.ageMs / 1000)}s old)`);
+	}
+	if (report.abandonedGates.length > 0) {
+		lines.push(`  - ${report.abandonedGates.length} abandoned lock ownership gate(s):`);
+		for (const gate of report.abandonedGates) lines.push(`      ${gate.fileName} (pid ${gate.pid}, ${Math.round(gate.ageMs / 1000)}s old)`);
+		lines.push("      repair never removes these; stop every Goal X session in this project, then delete each gate by hand");
 	}
 	if (report.orphanedSnapshotGoals.length > 0) {
 		lines.push(`  - ${report.orphanedSnapshotGoals.length} orphaned snapshot entr${report.orphanedSnapshotGoals.length === 1 ? "y" : "ies"}:`);
