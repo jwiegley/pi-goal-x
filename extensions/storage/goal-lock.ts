@@ -25,7 +25,7 @@ export function acquireGoalLock(
 	opts: { attempts?: number; retryMs?: number; staleTtlMs?: number } = {},
 ): GoalLock {
 	const attempts = opts.attempts ?? 8;
-	ensureGoalStorageDirectory(ctx, GOAL_LOCK_DIR, false);
+	ensureGoalStorageDirectory(ctx, GOAL_LOCK_DIR);
 	return acquireFileLock(path.join(goalStoragePath(ctx, GOAL_LOCK_DIR), `${safeLockName(goalId)}.lock`), {
 		attempts,
 		retryMs: opts.retryMs ?? 1,

@@ -118,8 +118,8 @@ test("session start and draft rehydration use indexed queries instead of the bra
 		} as unknown as ExtensionContext;
 		goalExtension(pi as never);
 		await handlers.get("session_start")?.({ reason: "startup" }, ctx);
-		const core = (pi as unknown as { _goalCore: { focusedGoalId: string | null } & Parameters<typeof rehydrateDraft>[0] })._goalCore;
-		assert.equal(core.focusedGoalId, goal.id);
+		const core = (pi as unknown as { _goalCore: { state: { focusedGoalId: string | null } } & Parameters<typeof rehydrateDraft>[0] })._goalCore;
+		assert.equal(core.state.focusedGoalId, goal.id);
 		assert.ok(calls.some((call) => call.customType === FOCUS_ENTRY));
 		assert.ok(calls.some((call) => call.customType === STATE_ENTRY));
 		assert.ok(calls.some((call) => call.customType === DRAFT_ENTRY), "session start rehydrates drafts through the query");

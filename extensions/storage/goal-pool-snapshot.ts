@@ -19,7 +19,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { writeFileAtomic, writeFileAtomicSync } from "./atomic-rename.ts";
+import { assertSafeFileAncestors, atomicWriteRegularFile, readRegularFile } from "./safe-fs.ts";
 import { ensureGoalStorageDirectory, goalPoolSnapshotPath, isExternalGoalStorage } from "./goal-root.ts";
 import { isActiveGoalFileName, type GoalFileContext } from "./goal-paths.ts";
 import { normalizeRelPath, type GoalRecord } from "../goal-record.ts";
@@ -33,7 +33,7 @@ interface PoolSnapshot {
 /** Before 2026-08-09 the snapshot lived inside the goals dir. */
 const LEGACY_NAME = ".goals-pool-snapshot.json";
 
-function legacyPath(root: string): string {
+export function legacyPath(root: string): string {
 	return path.join(root, LEGACY_NAME);
 }
 
@@ -48,22 +48,17 @@ function parseSnapshot(text: string): PoolSnapshot | null {
 	return null;
 }
 
-function readFileOrEmpty(filePath: string): string {
-	try { return fs.readFileSync(filePath, "utf8"); } catch { return ""; }
-}
-
-async function readFileOrEmptyAsync(filePath: string): Promise<string> {
-	try { return await fs.promises.readFile(filePath, "utf8"); } catch { return ""; }
+function readFileOrEmpty(ctx: GoalFileContext, filePath: string): string {
+	try { return readRegularFile(ctx.cwd, filePath, 16 * 1024 * 1024).bytes.toString("utf8"); } catch { return ""; }
 }
 
 /** The current snapshot, falling back to the legacy in-dir file until the next write replaces it. */
 export function readPoolSnapshotSync(ctx: GoalFileContext, root: string): PoolSnapshot | null {
-	return parseSnapshot(readFileOrEmpty(goalPoolSnapshotPath(ctx))) ?? parseSnapshot(readFileOrEmpty(legacyPath(root)));
+	return parseSnapshot(readFileOrEmpty(ctx, goalPoolSnapshotPath(ctx))) ?? parseSnapshot(readFileOrEmpty(ctx, legacyPath(root)));
 }
 
 export async function readPoolSnapshotAsync(ctx: GoalFileContext, root: string): Promise<PoolSnapshot | null> {
-	return parseSnapshot(await readFileOrEmptyAsync(goalPoolSnapshotPath(ctx)))
-		?? parseSnapshot(await readFileOrEmptyAsync(legacyPath(root)));
+	return readPoolSnapshotSync(ctx, root);
 }
 
 /** Open goals of a snapshot, keyed by id (complete goals are not in the pool). */
@@ -115,9 +110,10 @@ const legacyRemoved = new Set<string>();
  * location. Once per goals dir per process: every later write would only
  * repeat a failing unlink.
  */
-function removeLegacySnapshot(root: string): void {
+function removeLegacySnapshot(ctx: GoalFileContext, root: string): void {
 	if (legacyRemoved.has(root)) return;
 	try {
+		assertSafeFileAncestors(ctx.cwd, legacyPath(root));
 		fs.unlinkSync(legacyPath(root));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return; // try again on the next write
@@ -127,8 +123,12 @@ function removeLegacySnapshot(root: string): void {
 
 function writeSnapshotSync(ctx: GoalFileContext, root: string, snapshot: PoolSnapshot): void {
 	prepareSnapshotDirectory(ctx);
-	writeFileAtomicSync(goalPoolSnapshotPath(ctx), JSON.stringify(snapshot));
-	removeLegacySnapshot(root);
+	atomicWriteRegularFile(ctx.cwd, goalPoolSnapshotPath(ctx), Buffer.from(JSON.stringify(snapshot), "utf8"));
+	removeLegacySnapshot(ctx, root);
+}
+
+export function writePoolSnapshotSyncChecked(ctx: GoalFileContext, root: string, goals: GoalRecord[]): void {
+	writeSnapshotSync(ctx, root, { version: 1, dirMtimeMs: fs.lstatSync(root).mtimeMs, goals });
 }
 
 export function writePoolSnapshotSync(ctx: GoalFileContext, root: string, goals: GoalRecord[]): void {
@@ -140,14 +140,7 @@ export function writePoolSnapshotSync(ctx: GoalFileContext, root: string, goals:
 }
 
 export async function writePoolSnapshotAsync(ctx: GoalFileContext, root: string, goals: GoalRecord[]): Promise<void> {
-	try {
-		const rootStat = await fs.promises.lstat(root);
-		prepareSnapshotDirectory(ctx);
-		await writeFileAtomic(goalPoolSnapshotPath(ctx), JSON.stringify({ version: 1, dirMtimeMs: rootStat.mtimeMs, goals } satisfies PoolSnapshot));
-		removeLegacySnapshot(root);
-	} catch {
-		// best-effort
-	}
+	writePoolSnapshotSync(ctx, root, goals);
 }
 
 /** Merge a delta (a written goal or a removal) into the persisted snapshot. */

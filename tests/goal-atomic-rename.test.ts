@@ -105,8 +105,12 @@ test("a temporary-file collision does not delete someone else's file", t => {
 	t.after(() => fs.rmSync(cwd, {recursive: true, force: true}));
 	fs.mkdirSync(path.join(cwd, ".pi/goals"), {recursive: true});
 	t.mock.method(Date, "now", () => 1234);
+	// Temporary files live in a private, randomly named directory, so a file at
+	// any predictable temporary name belongs to someone else and is untouched.
 	const temp = path.join(cwd, `.pi/goals/goal.md.${process.pid}.1234.tmp`);
 	fs.writeFileSync(temp, "other writer");
-	assert.throws(() => atomicWriteGoalFile({cwd}, ".pi/goals", ".pi/goals/goal.md", "replacement"));
+	atomicWriteGoalFile({cwd}, ".pi/goals", ".pi/goals/goal.md", "replacement");
+	assert.equal(fs.readFileSync(path.join(cwd, ".pi/goals/goal.md"), "utf8"), "replacement");
 	assert.equal(fs.readFileSync(temp, "utf8"), "other writer");
+	assert.deepEqual(fs.readdirSync(path.join(cwd, ".pi/goals")).filter(name => name.includes(".write-")), [], "the private temporary directory is removed");
 });

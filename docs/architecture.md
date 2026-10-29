@@ -280,6 +280,12 @@ never rewritten. Checkpoints beside it are derived and rebuilt from the ledger
 when old or corrupt. Older goal files, ledgers and session entries stay
 readable.
 
+Goal and snapshot reads use bounded, checked regular-file descriptors under the
+project root; replacement uses private exclusive temporary files. Archival
+publishes without clobbering and claims the validated active inode. These checks
+assume a stable, private project directory and cooperating Goal X instances;
+Node does not expose directory-descriptor operations needed to defend against a
+hostile same-user process swapping paths during an operation.
 ## Tests
 
 ```bash
