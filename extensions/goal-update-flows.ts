@@ -31,6 +31,7 @@ import {
 	buildBlockerFingerprint,
 	consumeOracleFollowupMarker,
 	hasPendingOracleAdviceForFocusedGoal,
+	rearmOracleAdvice,
 	renderActionableOracleAdvice,
 	renderOracleAdviceReminder,
 	runBlockerOracle,
@@ -106,12 +107,12 @@ export async function runGoalBlockedFlow(core: GoalUpdateFlowsCore, ctx: Extensi
 	if (consult.result?.disposition === "actionable") {
 		if (consult.followupAttempted || hasPendingOracleAdviceForFocusedGoal(goalAtBlock.id)) return commitBlocked();
 		// Re-arm without consulting again and refuse the block.
-		const adviceText = renderOracleAdviceReminder({
+		const adviceText = renderOracleAdviceReminder(rearmOracleAdvice({
 			goalId: goalAtBlock.id,
 			fingerprint,
 			adviceId: consult.result.adviceId,
 			text: consult.result.summary,
-		});
+		}));
 		return goalTextResult(`${adviceText}\n\nThe goal was NOT marked blocked.`, goalAtBlock, false);
 	}
 	if (consult.result?.disposition === "needs_human" || consult.result?.disposition === "insufficient_context") {
