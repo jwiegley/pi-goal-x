@@ -206,13 +206,20 @@ export function registerGoalCommands(core: GoalCore): void {
 		const report = runRecoveryReport(ctx);
 		if (/^repair$/i.test(rawArgs)) {
 			const result = await runRecoveryRepair(ctx, report, async () => {
-				const confirmed = await ctx.ui.confirm(`Remove ${report.staleLocks.length} stale lock(s) and refresh the pool snapshot?`, `Files are backed up to .pi/goals/.recovery-backup first.`);
+				const gates = report.abandonedGates.length > 0 ? ` ${report.abandonedGates.length} abandoned lock gate(s) stay for removal by hand.` : "";
+				const confirmed = await ctx.ui.confirm(`Archive ${report.completedActiveGoals.length} stranded completed goal(s), backfill ${report.pendingRecoveryLedger.length} pending ledger record(s), remove ${report.staleLocks.length} stale lock(s), and refresh the pool snapshot?${gates}`, `Files are backed up to .pi/goals/.recovery-backup first.`);
 				return confirmed === true;
 			});
 			if (result.confirmed) {
-				ctx.ui.notify(result.applied.length > 0
-					? `goal-recovery repair: ${result.applied.length} operation(s) applied.\n${result.applied.map((a) => `  - ${a}`).join("\n")}\nBackup: ${result.backupDir}`
-					: "goal-recovery repair: nothing to repair.", "info");
+				const lines = [
+					result.applied.length + result.failures.length > 0
+						? `goal-recovery repair: ${result.applied.length} operation(s) applied, ${result.failures.length} failed.`
+						: "goal-recovery repair: nothing to repair.",
+					...result.applied.map((applied) => `  - applied: ${applied}`),
+					...result.failures.map((failure) => `  - failed: ${failure.operation}/${failure.stage} ${failure.target} — ${failure.message}`),
+					...(result.backupDir ? [`Backup: ${result.backupDir}`] : []),
+				];
+				ctx.ui.notify(lines.join("\n"), result.failures.length > 0 ? "warning" : "info");
 			} else {
 				ctx.ui.notify("goal-recovery repair: cancelled — nothing changed.", "info");
 			}
@@ -795,7 +802,7 @@ export function registerGoalCommands(core: GoalCore): void {
 		},
 	});
 	define("goal-recovery", {
-		description: "Read-only storage/recovery report (malformed goal files, malformed ledger lines, stale locks, orphaned snapshot data). Append \"repair\" to remove stale locks and refresh the pool snapshot after confirmation (with backup).",
+		description: "Read-only storage/recovery report (malformed goal files and ledger lines, stale locks, orphaned snapshot data, completed goals stranded at active paths). Append \"repair\" to archive stranded completions, remove stale locks and refresh the pool snapshot after confirmation (with backup).",
 		handler: async (rawArgs, ctx) => {
 			await runGoalRecovery((rawArgs ?? "").trim(), ctx);
 		},

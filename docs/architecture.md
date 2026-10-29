@@ -358,6 +358,15 @@ that fails after a committed mutation is reported without turning the mutation
 into a failure. A gate abandoned by a crash fails closed; `/goal-recovery`
 reports it for removal by hand once every Goal X session has stopped.
 
+`/goal-recovery` also reports completed records stranded at active paths by a
+crash or a failed archive; the pool no longer shows them. Its repair archives
+each one under the goal lock: a marker in `.recovery-ledger-pending` first
+fixes the archive's path and bytes, the original is hard-linked into the
+recovery backup before its active name is removed, and the missing
+`goal_completed` and `goal_archived` events are then appended. An interrupted
+repair resumes from the marker to the same archive, and every failed repair
+step is reported with its operation and stage.
+
 This contract assumes a stable, private, user-owned project directory and
 cooperating Goal X instances. Node exposes no `openat`/`renameat`/`unlinkat` or
 conditional final-name operation, so protection against a hostile same-user

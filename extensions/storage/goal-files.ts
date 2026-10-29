@@ -35,6 +35,13 @@ export const MAX_CHECKED_GOAL_FILE_BYTES = 16 * 1024 * 1024;
 export const MAX_CHECKED_POOL_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 
 /** The bytes and identity of one goal file, read from a single checked descriptor. */
+/** A completed active record moved into a permanent recovery backup by /goal-recovery. */
+export interface RecoveryGoalFileClaim {
+	sourcePath: string;
+	backupPath: string;
+	snapshot: GoalFileSnapshot;
+}
+
 export interface GoalFileSnapshot {
 	identity: RegularFileIdentity;
 	bytes: Buffer;
@@ -637,6 +644,116 @@ export function archiveGoalFile(
 		} catch {}
 	}
 	discardArchivedPoolSnapshots(ctx, sourcePath);
+	return next;
+}
+
+function restoreRecoveryClaim(ctx: GoalFileContext, claim: RecoveryGoalFileClaim): void {
+	assertSafeFileAncestors(ctx.cwd, claim.sourcePath);
+	assertSafeFileAncestors(ctx.cwd, claim.backupPath);
+	try {
+		fs.lstatSync(claim.sourcePath);
+		return; // A successor owns the canonical name; leave it untouched.
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	// Keep the permanent backup and restore the active name as another hard link.
+	fs.linkSync(claim.backupPath, claim.sourcePath);
+	invalidateGoalPathCaches(claim.sourcePath);
+	invalidateGoalDirCache(goalStoragePath(ctx, GOALS_DIR));
+}
+
+/**
+ * Move a completed active record into a permanent recovery backup: publish the
+ * backup as a no-clobber hard link first, then claim and remove exactly the
+ * validated active inode. A crash from the link onward leaves the active
+ * name, the backup, or both, so a retry never depends on a random private
+ * name; a successor that appears at the active path is never removed.
+ */
+export function claimGoalFileForRecovery(
+	ctx: GoalFileContext,
+	current: GoalRecord,
+	expected: GoalFileSnapshot,
+	backupPath: string,
+): RecoveryGoalFileClaim {
+	if (!isSafeActivePath(ctx, current.activePath)) {
+		throw new Error(`Cannot archive goal ${current.id}: active path is missing or unsafe.`);
+	}
+	const source = resolveGoalPath(ctx, GOALS_DIR, current.activePath);
+	const beforeLink = readGoalFileSnapshotChecked(ctx, source);
+	if (!sameGoalFileSnapshot(beforeLink, expected)) {
+		throw new Error(`Active goal ${current.id} changed after its recovery backup was prepared.`);
+	}
+	assertSafeFileAncestors(ctx.cwd, backupPath);
+	fs.linkSync(source, backupPath);
+	const snapshot = readGoalFileSnapshotChecked(ctx, backupPath);
+	if (!sameGoalFileSnapshot(snapshot, expected)) {
+		throw new Error(`Recovery backup for ${current.id} changed during publication.`);
+	}
+	const sourceClaim = claimRegularFile(ctx.cwd, source, MAX_CHECKED_GOAL_FILE_BYTES, "recovery-backup");
+	try {
+		if (!sameRegularFile(sourceClaim.file, snapshot.identity) || !sourceClaim.file.bytes.equals(snapshot.bytes)) {
+			throw new Error(`Active goal ${current.id} changed while recovery claimed it.`);
+		}
+		discardClaimedRegularFile(ctx.cwd, sourceClaim);
+	} catch (error) {
+		try {
+			restoreClaimedRegularFile(ctx.cwd, source, sourceClaim);
+		} catch {
+			// The permanent backup remains available to a marker-driven retry.
+		}
+		throw error;
+	}
+	invalidateGoalPathCaches(source);
+	invalidateGoalDirCache(goalStoragePath(ctx, GOALS_DIR));
+	return { sourcePath: source, backupPath, snapshot };
+}
+
+/**
+ * Archive a record claimed by claimGoalFileForRecovery at a fixed archive path
+ * and timestamp, so a retry reproduces the same bytes. A byte-exact archive
+ * left by an interrupted attempt is adopted; a successor at the active path
+ * stops the archive and the claim is restored.
+ */
+export function archiveClaimedGoalFile(
+	ctx: GoalFileContext,
+	current: GoalRecord,
+	claim: RecoveryGoalFileClaim,
+	archivedAt = nowIso(),
+	archivedPath = archivedPathForGoal(ctx, current),
+): GoalRecord {
+	const currentBackup = readGoalFileSnapshotChecked(ctx, claim.backupPath);
+	if (!sameGoalFileSnapshot(currentBackup, claim.snapshot)) {
+		throw new Error(`Recovery backup for ${current.id} changed before archival.`);
+	}
+	const next = recoveredArchivedGoal(ctx, current, archivedAt, archivedPath);
+	const archiveBytes = Buffer.from(serializeGoalFile(next), "utf8");
+	const assertNoSuccessor = (when: string): void => {
+		try {
+			fs.lstatSync(claim.sourcePath);
+			throw new Error(`A successor appeared at the active path for ${current.id} ${when}.`);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	};
+	try {
+		assertNoSuccessor("before archival");
+		try {
+			atomicWriteGoalFile(ctx, ARCHIVED_GOALS_DIR, archivedPath, archiveBytes.toString("utf8"), { replace: false });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			const existing = readRegularFile(ctx.cwd, resolveGoalPath(ctx, ARCHIVED_GOALS_DIR, archivedPath), MAX_CHECKED_GOAL_FILE_BYTES);
+			if (!existing.bytes.equals(archiveBytes)) throw error;
+		}
+		assertNoSuccessor("during archival");
+	} catch (error) {
+		try {
+			restoreRecoveryClaim(ctx, claim);
+		} catch {
+			// The permanent backup remains recoverable; never overwrite a successor.
+		}
+		throw error;
+	}
+	discardArchivedPoolSnapshots(ctx, claim.sourcePath);
 	return next;
 }
 

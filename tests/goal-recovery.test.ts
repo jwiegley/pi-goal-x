@@ -4,15 +4,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 import test from "node:test";
 
-import { createGoal } from "../extensions/goal-record.ts";
-import { readGoalLedger } from "../extensions/goal-ledger.ts";
-import { readActiveGoalPool, writeActiveGoalFile, type GoalFileContext } from "../extensions/storage/goal-files.ts";
+import { createGoal, type GoalRecord } from "../extensions/goal-record.ts";
+import { goalLedgerPath, invalidateGoalLedgerCache, readGoalLedger } from "../extensions/goal-ledger.ts";
+import { invalidateGoalPoolCache, parseGoalFile, readActiveGoalPool, writeActiveGoalFile, type GoalFileContext } from "../extensions/storage/goal-files.ts";
 import {
 	runRecoveryReport,
 	runRecoveryRepair,
 	formatRecoveryReport,
 	GOALS_DIR,
 	RECOVERY_BACKUP_DIR,
+	RECOVERY_LEDGER_PENDING_DIR,
 } from "../extensions/goal-recovery.ts";
 
 function tempCtx(): GoalFileContext {
@@ -158,6 +159,7 @@ test("recovery leaves a live owner's lock alone however old it is", async () => 
 		fs.writeFileSync(path.join(ctx.cwd, GOALS_DIR, ".locks", "g2.lock"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), "utf8");
 		const result = await runRecoveryRepair(ctx, report, async () => true);
 		assert.deepEqual(result.applied, [], "a lock that is no longer stale is not removed");
+		assert.deepEqual(result.failures.map((failure) => `${failure.operation}/${failure.stage} ${failure.target}`), ["remove_stale_lock/validate g2.lock"]);
 		assert.ok(fs.existsSync(lockPath));
 		assert.ok(fs.existsSync(path.join(ctx.cwd, GOALS_DIR, ".locks", "g2.lock")));
 	} finally {
@@ -178,6 +180,78 @@ test("recovery reports an abandoned ownership gate and never removes it", async 
 		const result = await runRecoveryRepair(ctx, report, async () => true);
 		assert.equal(result.confirmed, false, "there is nothing repair may do");
 		assert.ok(fs.existsSync(path.join(ctx.cwd, GOALS_DIR, ".locks", "g1.lock.gate")));
+	} finally {
+		cleanup(ctx);
+	}
+});
+
+function writeStrandedCompletion(ctx: GoalFileContext): { goal: GoalRecord; bytes: Buffer } {
+	const goal = writeActiveGoalFile(ctx, { ...createGoal({ objective: "finished elsewhere", autoContinue: false, sisyphus: false }, Date.UTC(2026, 9, 1, 9, 0, 0)), status: "complete" });
+	return { goal, bytes: fs.readFileSync(path.join(ctx.cwd, goal.activePath!)) };
+}
+
+function goalEvents(ctx: GoalFileContext, goalId: string): string[] {
+	invalidateGoalLedgerCache();
+	return readGoalLedger(ctx).events.filter((event) => "goalId" in event && event.goalId === goalId).map((event) => event.type);
+}
+
+test("a completed record stranded at an active path is archived with its ledger events", async () => {
+	const ctx = tempCtx();
+	try {
+		const { goal, bytes } = writeStrandedCompletion(ctx);
+		invalidateGoalPoolCache();
+		assert.equal(readActiveGoalPool(ctx).has(goal.id), false, "the pool no longer shows a completed record");
+		const report = runRecoveryReport(ctx);
+		assert.deepEqual(report.completedActiveGoals, [{ goalId: goal.id, activePath: goal.activePath }]);
+		assert.equal(report.healthy, false);
+		assert.match(formatRecoveryReport(report), /completed goal record\(s\) still at active paths[\s\S]*repair` to archive stranded completions/);
+
+		const result = await runRecoveryRepair(ctx, report, async () => true);
+		assert.deepEqual(result.failures, []);
+		assert.deepEqual(result.applied, [`archived recovered completed goal ${goal.id}`, `reconciled recovery ledger for ${goal.id}`]);
+		assert.equal(fs.existsSync(path.join(ctx.cwd, goal.activePath!)), false, "the active name is gone");
+		const archivedDir = path.join(ctx.cwd, GOALS_DIR, "archived");
+		const archives = fs.readdirSync(archivedDir);
+		assert.equal(archives.length, 1);
+		const archived = parseGoalFile(path.join(archivedDir, archives[0]!))!;
+		assert.equal(archived.id, goal.id);
+		assert.equal(archived.status, "complete");
+		assert.deepEqual(fs.readFileSync(path.join(result.backupDir!, `completed-${goal.id}.md`)), bytes, "the original record is kept in the backup");
+		assert.deepEqual(goalEvents(ctx, goal.id), ["goal_completed", "goal_archived"]);
+		assert.deepEqual(fs.readdirSync(path.join(ctx.cwd, RECOVERY_LEDGER_PENDING_DIR)), [], "the marker is removed once the ledger has both events");
+
+		const after = runRecoveryReport(ctx);
+		assert.deepEqual(after.completedActiveGoals, []);
+		assert.deepEqual(after.pendingRecoveryLedger, []);
+		const again = await runRecoveryRepair(ctx, after, async () => assert.fail("nothing is left to repair"));
+		assert.equal(again.confirmed, false);
+	} finally {
+		cleanup(ctx);
+	}
+});
+
+test("a ledger backfill that fails is reported and finished by a later repair", async () => {
+	const ctx = tempCtx();
+	try {
+		const { goal } = writeStrandedCompletion(ctx);
+		// A directory at the ledger's append-lock path makes every append fail
+		// while the ledger itself stays readable.
+		const appendLock = path.join(path.dirname(goalLedgerPath(ctx)), ".goal-events.lock.sqlite");
+		fs.mkdirSync(appendLock);
+		const first = await runRecoveryRepair(ctx, runRecoveryReport(ctx), async () => true);
+		assert.deepEqual(first.applied, [`archived recovered completed goal ${goal.id}`]);
+		assert.deepEqual(first.failures.map((failure) => `${failure.operation}/${failure.stage} ${failure.target}`), [`append_recovery_ledger/append ${goal.id}`]);
+		const pending = runRecoveryReport(ctx);
+		assert.deepEqual(pending.completedActiveGoals, [], "the completion was archived");
+		assert.deepEqual(pending.pendingRecoveryLedger.map((entry) => entry.goalId), [goal.id], "the missing ledger events stay visible");
+		assert.match(formatRecoveryReport(pending), /pending recovery-ledger backfill/);
+
+		fs.rmdirSync(appendLock);
+		const second = await runRecoveryRepair(ctx, pending, async () => true);
+		assert.deepEqual(second.failures, []);
+		assert.deepEqual(second.applied, [`reconciled recovery ledger for ${goal.id}`]);
+		assert.deepEqual(goalEvents(ctx, goal.id), ["goal_completed", "goal_archived"]);
+		assert.equal(runRecoveryReport(ctx).healthy, true);
 	} finally {
 		cleanup(ctx);
 	}
