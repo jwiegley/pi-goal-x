@@ -291,6 +291,8 @@ per-goal facts, and maintain at most sixteen cached indexes and one
 single-goal checkpoint. Older history outside the retained window is reported
 as truncated. Checkpoint reuse validates ledger identity and fixed-size anchors;
 the append-only contract excludes rewrites elsewhere in the covered prefix.
+Appends are serialized by a private SQLite lock and verified against the ledger
+inode. Ambiguous append failures are reported without event-by-event retries.
 ## Tests
 
 ```bash

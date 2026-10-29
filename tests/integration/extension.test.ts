@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 import { createGoal, goalFocusDetails } from "../../extensions/goal-record.ts";
 import { activePathForGoal, parseGoalFile, serializeGoalFile, writeActiveGoalFile } from "../../extensions/storage/goal-files.ts";
-import { goalLedgerPath } from "../../extensions/goal-ledger.ts";
+import { appendGoalEvent, goalLedgerPath } from "../../extensions/goal-ledger.ts";
 import { activeGoalFiles, ledgerEvents, removeDir, tempDir } from "../support/fs.ts";
 
 interface HarnessOptions {
@@ -822,11 +822,11 @@ describe("completion transaction hardening (follow-up Stage 3)", () => {
 		const f = fixture();
 		const goalsDir = path.join(f.cwd, ".pi", "goals");
 		try {
-			// Pre-create the ledger file so its fallback append path works even
-			// when the goals directory is read-only (append needs write on the
-			// file, not the directory; the atomic goal write needs a writable
-			// directory and therefore fails).
-			writeFileSync(goalLedgerPath({ cwd: f.cwd }), "", "utf8");
+			// Pre-create the ledger and its append-lock database so appends work
+			// even when the goals directory is read-only (an append needs write
+			// access to those files, not the directory; the atomic goal write
+			// needs a writable directory and therefore fails).
+			assert.equal(appendGoalEvent({ cwd: f.cwd }, { type: "goal_stalled", goalId: "unrelated-fixture", reason: "initializes the ledger", at: new Date().toISOString() }).ok, true);
 			const h = createHarness({
 				cwd: f.cwd, sessionEntries: f.sessionEntries,
 				runCompletionAuditor: async () =>
