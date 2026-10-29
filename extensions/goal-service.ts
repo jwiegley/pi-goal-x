@@ -300,27 +300,25 @@ export class GoalService {
 
 	/**
 	 * Append ledger events without making them part of the authoritative state
-	 * transaction. A batch is the common path; individual retries preserve the
-	 * existing best-effort behavior and keep failures observable per event.
+	 * transaction. A failed append is ambiguous — the kernel may have accepted
+	 * some or all of the bytes before the error — so it is diagnosed once and
+	 * never retried event by event, which could record events twice.
 	 */
 	private appendLedgerEventsBestEffort(ctx: GoalServiceContext, events: GoalLedgerEvent[]): boolean {
 		if (events.length === 0) return true;
-		if (events.length > 1 && appendGoalEvents(ctx, events).ok) return true;
-  let success = true;
-		for (const event of events) {
-			const append = appendGoalEvent(ctx, event);
-			if (!append.ok) {
-    success = false;
-				this.ref.onDiagnostic({
-					severity: "warning",
-					source: "ledger",
-					goalId: "goalId" in event ? event.goalId : undefined,
-					eventType: event.type,
-					message: `Ledger append failed for ${event.type}${"goalId" in event ? ` (goal ${event.goalId})` : ""}: ${String(append.error)}`,
-				});
-			}
-		}
-  return success;
+		const append = events.length === 1 ? appendGoalEvent(ctx, events[0]!) : appendGoalEvents(ctx, events);
+		if (append.ok) return true;
+		const first = events[0]!;
+		this.ref.onDiagnostic({
+			severity: "warning",
+			source: "ledger",
+			goalId: "goalId" in first ? first.goalId : undefined,
+			eventType: events.length === 1 ? first.type : "batch",
+			message: events.length === 1
+				? `Ledger append failed for ${first.type}${"goalId" in first ? ` (goal ${first.goalId})` : ""}: ${String(append.error)}`
+				: `Ledger batch append failed for ${events.length} events; the ambiguous batch was not retried: ${String(append.error)}`,
+		});
+		return false;
 	}
 
 	/** Safe focused record reconciliation from disk. */

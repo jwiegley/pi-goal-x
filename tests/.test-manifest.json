@@ -35,6 +35,7 @@
     ".tests/goal-harness-shell.test.ts",
     ".tests/goal-keyboard-focus.test.ts",
     ".tests/goal-layered-settings.test.ts",
+    ".tests/goal-ledger-append.test.ts",
     ".tests/goal-ledger-checkpoint.test.ts",
     ".tests/goal-ledger.test.ts",
     ".tests/goal-live-retention.test.ts",

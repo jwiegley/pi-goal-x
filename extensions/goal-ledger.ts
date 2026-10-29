@@ -1,4 +1,4 @@
-import { goalStoragePath, ensureGoalStorageDirectory, isExternalGoalStorage, type GoalStorageContext } from "./storage/goal-root.ts";
+import { goalStoragePath, ensureGoalStorageDirectory, type GoalStorageContext } from "./storage/goal-root.ts";
 import { indexedActivityEvents } from "./goal-activity.ts";
 import {
   GOAL_INDEX_ACTIVITY_LIMIT,
@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { safeIdPart } from "./goal-record.ts";
-import { atomicWriteRegularFile, assertSafeFileAncestors, openRegularFile, readRegularFile } from "./storage/safe-fs.ts";
+import { atomicWriteRegularFile, assertSafeFileAncestors, openRegularFile, readRegularFile, writeAll } from "./storage/safe-fs.ts";
 
 export const GOAL_LEDGER_FILE = ".pi/goals/goal_events.jsonl";
 
@@ -164,44 +164,175 @@ export function appendGoalEvent(ctx: GoalLedgerContext, event: GoalLedgerEvent):
   return appendLedgerLines(ctx, [event]);
 }
 
-/** Append several ledger events as one line block (P1-8). */
+/** Append several ledger events as one line block (P1-8): one lock, one write. */
 export function appendGoalEvents(ctx: GoalLedgerContext, events: GoalLedgerEvent[]): GoalLedgerAppendResult {
   if (events.length === 0) return { ok: true };
   return appendLedgerLines(ctx, events);
 }
 
-function appendLedgerLines(ctx: GoalLedgerContext, events: GoalLedgerEvent[]): GoalLedgerAppendResult {
-  const filePath = goalLedgerPath(ctx);
-  const dir = path.dirname(filePath);
-  // NAF: per-dir memo — mkdir once per directory per process; steady-state
-  // appends skip it entirely (0 ops for the dir).
-  if (!ledgerDirsKnown.has(dir)) {
-    try {
-      ensureGoalStorageDirectory(ctx, ".pi/goals");
-      ledgerDirsKnown.add(dir);
-    } catch (err) {
-      return { ok: false, error: err };
-    }
-  }
+/*
+ * Appends from every Goal X process sharing a ledger are serialized through an
+ * exclusive SQLite transaction on a private lock database next to the ledger.
+ * The transaction holds an OS file lock, so a crashed holder's lock is released
+ * with its process instead of being guessed stale from a pid. It is only as
+ * reliable as the file system's locking, which SQLite documents as unreliable
+ * on some network file systems.
+ */
+const GOAL_LEDGER_LOCK_FILE = ".pi/goals/.goal-events.lock.sqlite";
+const GOAL_LEDGER_LOCK_APPLICATION_ID = 0x5049474c; // "PIGL"
+const GOAL_LEDGER_LOCK_WAIT_MS = 2 * 60 * 1000;
 
-  const lines = events.map((event) => JSON.stringify(event) + "\n").join("");
-  // Readers revalidate the ledger on every read, so an append keeps no
-  // in-memory copy of the history to update.
-  try {
-    if (isExternalGoalStorage(ctx)) {
-      ensureGoalStorageDirectory(ctx, ".pi/goals");
-      try { if (fs.lstatSync(filePath).isSymbolicLink()) throw new Error(`Goal ledger is a symlink: ${filePath}`); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
-    fs.appendFileSync(filePath, lines, "utf8");
-  } catch (err) {
-    return { ok: false, error: err };
-  }
-  return { ok: true };
+type SqliteModule = typeof import("node:sqlite");
+let sqliteModule: SqliteModule | undefined;
+
+/** Loaded on the first append, so processes that only read the ledger never load SQLite. */
+function sqlite(): SqliteModule {
+  return sqliteModule ??= process.getBuiltinModule("node:sqlite") as SqliteModule;
 }
 
-/** Directories whose ledger file exists (per-dir mkdir memo). */
-const ledgerDirsKnown = new Set<string>();
+function assertRegularLockPath(lockPath: string, message: string): void {
+  try {
+    const linked = fs.lstatSync(lockPath);
+    if (linked.isSymbolicLink() || !linked.isFile()) throw new Error(`${message}: ${lockPath}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function acquireLedgerAppendLock(ctx: GoalLedgerContext): () => void {
+  const root = ledgerRoot(ctx);
+  const lockPath = goalStoragePath(ctx, GOAL_LEDGER_LOCK_FILE);
+  ensureGoalStorageDirectory(ctx, ".pi/goals");
+  assertSafeFileAncestors(root, lockPath);
+  assertRegularLockPath(lockPath, "Goal ledger lock path is not a regular file");
+  let db: InstanceType<SqliteModule["DatabaseSync"]> | undefined;
+  try {
+    db = new (sqlite().DatabaseSync)(lockPath);
+    // Ownership inspection and initialization happen inside the exclusive
+    // transaction, so concurrent first writers cannot misread a half-made lock.
+    db.exec(`
+      PRAGMA busy_timeout = ${GOAL_LEDGER_LOCK_WAIT_MS};
+      PRAGMA journal_mode = DELETE;
+      BEGIN EXCLUSIVE;
+    `);
+    const application = db.prepare("PRAGMA application_id").get() as { application_id: number };
+    if (application.application_id === 0) {
+      const schema = db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").get() as { count: number };
+      if (schema.count !== 0) throw new Error(`Refusing unrecognized goal ledger lock database: ${lockPath}`);
+      db.exec(`PRAGMA application_id = ${GOAL_LEDGER_LOCK_APPLICATION_ID}`);
+    } else if (application.application_id !== GOAL_LEDGER_LOCK_APPLICATION_ID) {
+      throw new Error(`Refusing unrecognized goal ledger lock database: ${lockPath}`);
+    }
+    if (process.platform !== "win32") fs.chmodSync(lockPath, 0o600);
+    db.exec("CREATE TABLE IF NOT EXISTS ledger_lock (singleton INTEGER PRIMARY KEY CHECK (singleton = 1))");
+    assertRegularLockPath(lockPath, "Goal ledger lock path changed during acquisition");
+  } catch (error) {
+    try {
+      db?.close();
+    } catch {}
+    throw error;
+  }
+  const held = db;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try {
+      held.exec("COMMIT");
+    } finally {
+      held.close();
+    }
+  };
+}
+
+function withLedgerAppendLock(ctx: GoalLedgerContext, body: () => GoalLedgerAppendResult): GoalLedgerAppendResult {
+  const release = acquireLedgerAppendLock(ctx);
+  let completed = false;
+  let result: GoalLedgerAppendResult | undefined;
+  let failure: unknown;
+  try {
+    result = body();
+    completed = true;
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    release();
+  } catch (releaseError) {
+    if (!completed) throw new AggregateError([failure, releaseError], "Goal ledger append and lock release both failed.", { cause: failure });
+    // The append's own result stands; the OS drops the lock with the handle.
+    console.warn(`Goal ledger lock release failed after the append result: ${String(releaseError)}`);
+  }
+  if (!completed) throw failure;
+  return result!;
+}
+
+function appendLedgerLines(ctx: GoalLedgerContext, events: GoalLedgerEvent[]): GoalLedgerAppendResult {
+  const serialized: string[] = [];
+  try {
+    for (const event of events) {
+      const line = JSON.stringify(event);
+      const bytes = Buffer.byteLength(line, "utf8");
+      // Readers count longer lines as malformed; never write one.
+      if (bytes > MAX_LEDGER_LINE_BYTES) return { ok: false, error: new RangeError(`Goal ledger event is ${bytes} bytes; the maximum is ${MAX_LEDGER_LINE_BYTES}.`) };
+      serialized.push(line);
+    }
+  } catch (error) {
+    return { ok: false, error };
+  }
+  try {
+    return withLedgerAppendLock(ctx, () => appendLedgerLinesLocked(ctx, serialized));
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+function appendLedgerLinesLocked(ctx: GoalLedgerContext, serialized: string[]): GoalLedgerAppendResult {
+  const root = ledgerRoot(ctx);
+  const filePath = goalLedgerPath(ctx);
+  let fd: number | null = null;
+  try {
+    const opened = openRegularFile(root, filePath, fs.constants.O_RDWR | fs.constants.O_APPEND | fs.constants.O_CREAT);
+    fd = opened.fd;
+    // A torn final line (crash mid-append, or an editor that dropped the final
+    // newline) must not swallow this batch: start it on a fresh line.
+    let separator = "";
+    if (opened.identity.size > 0) {
+      const finalByte = Buffer.allocUnsafe(1);
+      if (fs.readSync(fd, finalByte, 0, 1, opened.identity.size - 1) === 1 && finalByte[0] !== 0x0a) separator = "\n";
+    }
+    // One O_APPEND descriptor writes the complete batch. A partial or
+    // ambiguous write is reported and never retried.
+    writeAll(fd, Buffer.from(separator + serialized.map((line) => line + "\n").join(""), "utf8"));
+    const written = fs.fstatSync(fd);
+    assertSafeFileAncestors(root, filePath);
+    const linked = fs.lstatSync(filePath);
+    if (linked.isSymbolicLink() || !linked.isFile() || linked.dev !== written.dev || linked.ino !== written.ino) {
+      throw new Error("Goal ledger path changed during append; the write result is ambiguous and will not be retried.");
+    }
+    // The bytes are committed once their inode is verified. A failed close(2)
+    // leaves descriptor state unspecified: detach the fd first and never turn a
+    // committed append into a retry signal.
+    const committedFd = fd;
+    fd = null;
+    try {
+      fs.closeSync(committedFd);
+    } catch {
+      // Committed ledger bytes remain authoritative despite close failure.
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Preserve the primary failure; never retry an fd with unspecified state.
+      }
+    }
+  }
+}
 
 /** Drop cached per-goal indexes at session boundaries; the ledger and its checkpoint stay on disk. */
 export function invalidateGoalLedgerCache(): void {

@@ -238,7 +238,14 @@ a later append cannot be told from a pure append and is outside the append-only
 contract. Oracle consult state is reduced while streaming the ledger on demand
 (a goal being reported blocked), so no per-fingerprint state is retained.
 History pages, `/goal-status` and the whole-ledger reader return bounded
-windows with exact counts. Saved goal/session formats remain compatible. Task presentation caches use content snapshots; usage changes
+windows with exact counts. Appends from every process sharing a ledger are
+serialized by an exclusive transaction on a private SQLite lock database next
+to the ledger (`.goal-events.lock.sqlite`), whose OS file lock is released when
+a holder crashes; a batch is written through one `O_APPEND`
+descriptor, starts on a fresh line after a torn final line, never contains an
+event longer than one MiB, and is verified to have reached the inode the
+ledger path still names. A failed append is ambiguous, so it is reported once
+and never retried event by event. Saved goal/session formats remain compatible. Task presentation caches use content snapshots; usage changes
 do not rebuild task trees. Stable prompt rules precede changing goal data and
 usage counters, with retrieval instructions beside bounded excerpts.
 
@@ -326,9 +333,8 @@ focused active file and reconciles lifecycle state from disk; prompt-body
 edits are picked up from `# Goal Prompt`. Path safety checks reject absolute
 paths, traversal, NUL bytes, symlinks, and paths outside the goal directories.
 
-Goal files, the pool snapshot, archives, ledger reads and the ledger
-checkpoint are read and written through `storage/safe-fs.ts`, anchored at
-`ctx.cwd`: every
+Goal files, the pool snapshot, archives, the ledger and its checkpoint are
+read and written through `storage/safe-fs.ts`, anchored at `ctx.cwd`: every
 directory between the project and a file must be a real directory, final files
 are opened with `O_NOFOLLOW` and must be regular files, reads are bounded and
 taken from one descriptor whose identity is checked against the path, and
