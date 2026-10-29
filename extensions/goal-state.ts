@@ -28,6 +28,7 @@ import {
 	type StopReason,
 } from "./goal-record.ts";
 import {
+	archivedPathForGoal,
 	mergeGoalPromptFromDisk,
 	readActiveGoalPoolAsync,
 	sanitizeGoalPaths,
@@ -819,6 +820,14 @@ export function createGoalCore(
 			mutate: (g) => {
 				const status = g.status === "complete" ? "complete" : "paused";
 				return { ...g, status, stopReason: reason };
+			},
+			// Record the archive, so history and recovery see a cleared goal too.
+			ledger: (written) => {
+				const archivePath = written.archivedPath ?? archivedPathForGoal(ctx, written);
+				return [
+					...(written.status === "complete" ? [] : [{ type: "goal_aborted" as const, goalId: written.id, reason: reason ?? "unknown", archivePath, at: written.updatedAt }]),
+					{ type: "goal_archived" as const, goalId: written.id, archivePath, at: written.updatedAt },
+				];
 			},
 		});
 		return result.ok ? result.goal : null;

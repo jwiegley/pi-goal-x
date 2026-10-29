@@ -49,7 +49,7 @@ test("lifecycle events map to readable activity text", () => {
 		"Started independent completion review.",
 		"Independent auditor approved completion.",
 		"Completed the goal.",
-		"Archived the completed goal.",
+		"Archived the goal.",
 	]);
 });
 

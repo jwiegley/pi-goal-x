@@ -789,6 +789,33 @@ describe("confirmation and audit UX (follow-up Stage 2)", () => {
 			const archived = readdirSync(path.join(f.cwd, ".pi", "goals", "archived"));
 			assert.equal(archived.length, 1, "exactly one goal archived");
 			assert.ok(h.notifies.some((n) => n.msg.includes("cleared and archived")), "archive acknowledged");
+			const recorded = ledgerEvents(f.cwd).filter((event) => event.goalId === f.goal.id).slice(-2);
+			const archivePath = `.pi/goals/archived/${archived[0]}`;
+			assert.deepEqual(recorded.map((event) => [event.type, event.archivePath]), [["goal_aborted", archivePath], ["goal_archived", archivePath]], "the ledger records the cleared goal's archive");
+			assert.equal(recorded[0]!.reason, "user");
+		} finally {
+			f.cleanup();
+		}
+	});
+
+	it("/goal-clear refuses a goal that changed while the confirmation was open", async () => {
+		const f = fixture();
+		try {
+			const h = createHarness({
+				cwd: f.cwd, sessionEntries: f.sessionEntries, hasUI: true,
+				confirm: async () => {
+					// Another session edits the goal before the user answers.
+					const file = path.join(f.cwd, ".pi", "goals", activeGoalFiles(f.cwd)[0]!);
+					const disk = parseGoalFile(file)!;
+					writeActiveGoalFile({ cwd: f.cwd }, { ...disk, objective: "Edited elsewhere", revision: (disk.revision ?? 0) + 1 });
+					return true;
+				},
+			});
+			await start(h);
+			await h.commands.get("goal-clear").handler("", h.ctx);
+			assert.equal(activeGoalFiles(f.cwd).length, 1, "the edited goal stays open");
+			assert.equal(readdirSync(path.join(f.cwd, ".pi", "goals", "archived")).length, 0);
+			assert.ok(h.notifies.some((n) => n.msg.includes("changed while confirming")), "the refusal is explained");
 		} finally {
 			f.cleanup();
 		}
