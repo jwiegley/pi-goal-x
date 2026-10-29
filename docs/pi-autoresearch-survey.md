@@ -27,10 +27,10 @@ This document records external patterns that are actually implemented in `pi-goa
 
 The current extension also adds behavior specific to goal drafting and lifecycle safety:
 
-- **Intent-before-run**: `/goals` and `/sisyphus` start a drafting discussion instead of immediate execution.
-- **Direct set shortcut**: `/goals-set` and `/sisyphus-set` immediately create a goal when the user already knows the final objective.
+- **Intent-before-run**: `/goal` and `/sisyphus` start a drafting discussion instead of immediate execution.
+- **Direct set shortcut**: `/goal-direct` and `/sisyphus-direct` immediately create a goal when the user already knows the final objective.
 - **Confirm-before-commit for discussions**: `propose_goal_draft` is the normal discussion-based creation path; `create_goal` stays hidden.
-- **Sisyphus as style**: `/sisyphus` and `/sisyphus-set` use the same lifecycle and tools as regular goals; they only change drafting/continuation wording and completion expectations.
+- **Sisyphus as style**: `/sisyphus` and `/sisyphus-direct` use the same lifecycle and tools as regular goals; they only change drafting/continuation wording and completion expectations.
 - **Full draft confirmation and creation output**: draft confirmation uses a plain-text report, and after confirmation the finalized objective is printed directly into the conversation.
 - **Full completion output**: completion prints a report directly into the conversation, including optional evidence and full goal details.
 - **Built-in question tools**: `goal_question` and `goal_questionnaire` provide package-local user-dialogue tools with `goal_` prefixes.

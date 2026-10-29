@@ -82,9 +82,10 @@ these files.
 ### 4.2 Ledger files
 
 The ledger is one project-level append-only JSONL file
-(`.pi/goals/goal_events.jsonl`). Its 18 event types cover creation,
+(`.pi/goals/goal_events.jsonl`). Its 29 event types cover creation,
 tweaks, focus changes, pause/resume/block/clear, completion requests, audit
-start/result/skip, budget limits, and task-list changes. The runtime reads it
+start/result/skip, budget limits and warnings, task-list and task changes,
+archives, and Oracle consultations. The runtime reads it
 for auditor-rejection memory and compaction summaries; it is never rewritten
 in place.
 
