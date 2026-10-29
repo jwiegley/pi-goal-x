@@ -6,7 +6,7 @@
  *   → 4. active-file write → 5. ledger append → 6. memory commit → 7. effects
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -384,6 +384,52 @@ it("ledger append failure after the authoritative write keeps the state transiti
 
 
 // ── Follow-up Stage 4: cross-process mutation control ───────────────────────
+
+describe("authoritative reads under the goal lock", () => {
+	it("an unreadable or malformed active file is an error, not a deletion", () => {
+		const f = fixture();
+		try {
+			const activePath = path.join(f.cwd, f.written.activePath!);
+			writeFileSync(activePath, "not a goal record\n", "utf8");
+			assert.throws(
+				() => f.service.apply({ cwd: f.cwd }, { reconcile: false, mutate: (g) => ({ ...g, objective: "never written" }) }),
+				/Could not read a valid goal record/,
+			);
+			assert.equal(readFileSync(activePath, "utf8"), "not a goal record\n", "the authoritative file is untouched");
+			assert.equal(f.ref.getFocusedGoalId(), f.written.id, "focus is kept so the change can be retried");
+			assert.deepEqual(f.log.goalLost, []);
+		} finally {
+			f.cleanup();
+		}
+	});
+
+	it("a symlinked active file is refused instead of being followed", () => {
+		const f = fixture();
+		try {
+			const activePath = path.join(f.cwd, f.written.activePath!);
+			const elsewhere = path.join(f.cwd, "elsewhere.md");
+			writeFileSync(elsewhere, readFileSync(activePath));
+			rmSync(activePath);
+			symlinkSync(elsewhere, activePath);
+			assert.throws(() => f.service.apply({ cwd: f.cwd }, { reconcile: false, mutate: (g) => ({ ...g, objective: "never written" }) }), /ELOOP|EMLINK|symbolic link/);
+			assert.equal(parseGoalFile(elsewhere)?.objective, f.written.objective, "the symlink target is untouched");
+		} finally {
+			f.cleanup();
+		}
+	});
+
+	it("archival through the service removes exactly the record validated under the lock", () => {
+		const f = fixture();
+		try {
+			const result = f.service.apply({ cwd: f.cwd }, { reconcile: false, archive: true, mutate: (g) => ({ ...g, status: "complete" as const }) });
+			assert.ok(result.ok);
+			assert.deepEqual(activeFiles(f.cwd), []);
+			assert.equal(readdirNames(path.join(f.cwd, ".pi", "goals", "archived")).length, 1);
+		} finally {
+			f.cleanup();
+		}
+	});
+});
 
 describe("cross-process mutation control (follow-up Stage 4)", () => {
 	/** A second GoalService instance + ref on the SAME cwd (separate session). */

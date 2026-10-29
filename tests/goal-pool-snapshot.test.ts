@@ -75,13 +75,13 @@ test("pool snapshot: a subsequent goal write keeps the fast-path key valid", () 
 	}
 });
 
-test("pool snapshot: legacy in-dir snapshot is served as a one-time fallback", () => {
+test("pool snapshot: a legacy in-dir snapshot that cannot be proven fresh is rescanned and removed", () => {
 	const cwd = tempCwd();
 	try {
 		writeGoal(cwd, "g1");
-		// Simulate a pre-relocation snapshot: valid content at the legacy path,
-		// consistent with the on-disk filename set (the name check must pass)
-		// and carrying a marker that only snapshot hydration would preserve.
+		// A pre-relocation snapshot lives inside the goals dir. Writing it there
+		// changes the directory's mtime, so its recorded key can never prove it
+		// fresh; matching filenames alone are not proof either.
 		const goalsDir = snapshotPaths(cwd).goalsDir;
 		const diskFile = fs.readdirSync(goalsDir).find((n) => n.startsWith("active_goal_"))!;
 		const diskGoal = parseGoalFile(path.join(goalsDir, diskFile))!;
@@ -95,9 +95,32 @@ test("pool snapshot: legacy in-dir snapshot is served as a one-time fallback", (
 
 		invalidateGoalPoolCache();
 		const pool = readActiveGoalPool({ cwd });
-		assert.equal(pool.size, 1, "legacy snapshot hydrates the pool");
+		assert.equal(pool.size, 1, "the rescan finds the goal");
 		const served = [...pool.values()][0]!;
-		assert.equal((served as GoalRecord & { snapshotMarker?: boolean }).snapshotMarker, true, "served from the legacy snapshot, not a rescan");
+		assert.equal((served as GoalRecord & { snapshotMarker?: boolean }).snapshotMarker, undefined, "served from a rescan, not the stale snapshot");
+		assert.ok(!fs.existsSync(snapshotPaths(cwd).legacyPath), "the rescan's snapshot write removes the legacy file");
+	} finally {
+		try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+	}
+});
+
+test("pool snapshot: a cold read sees an active file another writer replaced under the same name", () => {
+	const cwd = tempCwd();
+	try {
+		writeGoal(cwd, "g1");
+		invalidateGoalPoolCache();
+		readActiveGoalPool({ cwd }); // cold: writes a snapshot naming the same file
+		const goalsDir = snapshotPaths(cwd).goalsDir;
+		const diskFile = path.join(goalsDir, fs.readdirSync(goalsDir).find((n) => n.startsWith("active_goal_"))!);
+		// Another process saves by rename without touching the derived snapshot.
+		const replaced = fs.readFileSync(diskFile, "utf8").replaceAll("objective g1", "objective edited elsewhere");
+		const temp = path.join(goalsDir, "editor-save.tmp");
+		fs.writeFileSync(temp, replaced, "utf8");
+		fs.renameSync(temp, diskFile);
+
+		invalidateGoalPoolCache();
+		const pool = readActiveGoalPool({ cwd });
+		assert.equal([...pool.values()][0]?.objective, "objective edited elsewhere");
 	} finally {
 		try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
 	}

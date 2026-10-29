@@ -114,7 +114,7 @@ function appendLedgerLines(ctx: GoalLedgerContext, events: GoalLedgerEvent[]): G
   // appends skip it entirely (0 ops for the dir).
   if (!ledgerDirsKnown.has(dir)) {
     try {
-      ensureGoalStorageDirectory(ctx, ".pi/goals", false);
+      ensureGoalStorageDirectory(ctx, ".pi/goals");
       ledgerDirsKnown.add(dir);
     } catch (err) {
       return { ok: false, error: err };

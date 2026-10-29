@@ -74,9 +74,10 @@ test("invalid roots and symlinked managed directories fail instead of falling ba
 	assert.throws(() => goalStoragePath(a, ".pi/goals/../../escape"), /escapes/);
 	const outside = path.join(f.dir, "outside"); fs.mkdirSync(outside);
 	fs.symlinkSync(outside, path.join(f.root, "archived"));
-	const goal = createGoal({ objective: "No escape", autoContinue: true, sisyphus: false });
-	assert.throws(() => archiveGoalFile(a, goal), /symlink/);
+	const goal = writeActiveGoalFile(a, createGoal({ objective: "No escape", autoContinue: true, sisyphus: false }));
+	assert.throws(() => archiveGoalFile(a, { ...goal, status: "complete" }), /symlink/);
 	assert.deepEqual(fs.readdirSync(outside), []);
+	assert.ok(fs.existsSync(goalStoragePath(a, goal.activePath!)), "a refused archive leaves the active record in place");
 	fs.symlinkSync(outside, path.join(f.project, "linked-root"));
 	assert.throws(() => goalStorageRoot(f.context("linked", path.join(f.project, "linked-root"))), /symlink/);
 	assert.throws(() => goalStorageRoot(f.context("linked-parent", path.join(f.project, "linked-root", "pool"))), /symlink/);

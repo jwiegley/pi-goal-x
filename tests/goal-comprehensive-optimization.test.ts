@@ -124,6 +124,10 @@ test("cold pool results do not expose the cached Map and archive updates remove 
   readActiveGoalPool(f).clear(); assert.equal(readActiveGoalPool(f).size,1);
   invalidateGoalPoolCache(); (await readActiveGoalPoolAsync(f)).clear(); assert.equal(readActiveGoalPool(f).size,1);
   archiveGoalFile(f,goal);
+  // Archival discards the derived snapshot rather than publishing a remove-only
+  // delta a successor could race; the next cold read rescans and rewrites it.
+  assert.equal(fs.existsSync(path.join(f.cwd,".pi/.goals-pool-snapshot.json")),false);
+  invalidateGoalPoolCache(); assert.equal(readActiveGoalPool(f).size,0);
   const snapshot=JSON.parse(fs.readFileSync(path.join(f.cwd,".pi/.goals-pool-snapshot.json"),"utf8")); assert.deepEqual(snapshot.goals,[]);
  } finally {f.cleanup();invalidateGoalPoolCache();}
 });

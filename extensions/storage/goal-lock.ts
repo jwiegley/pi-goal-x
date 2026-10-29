@@ -86,7 +86,7 @@ export function acquireGoalLock(
 	const ttlMs = opts.staleTtlMs ?? DEFAULT_STALE_TTL_MS;
 	const lockDir = goalStoragePath(ctx, GOAL_LOCK_DIR);
 	const lockPath = path.join(lockDir, `${safeLockName(goalId)}.lock`);
-	ensureGoalStorageDirectory(ctx, GOAL_LOCK_DIR, false);
+	ensureGoalStorageDirectory(ctx, GOAL_LOCK_DIR);
 	const payload = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
 
 	for (let attempt = 0; attempt < attempts; attempt++) {

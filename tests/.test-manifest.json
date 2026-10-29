@@ -55,6 +55,7 @@
     ".tests/goal-recovery.test.ts",
     ".tests/goal-refresh.test.ts",
     ".tests/goal-rpc-dialogs.test.ts",
+    ".tests/goal-safe-fs.test.ts",
     ".tests/goal-scheduler.test.ts",
     ".tests/goal-service.test.ts",
     ".tests/goal-session-entries.test.ts",

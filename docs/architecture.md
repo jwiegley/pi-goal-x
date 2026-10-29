@@ -316,6 +316,26 @@ focused active file and reconciles lifecycle state from disk; prompt-body
 edits are picked up from `# Goal Prompt`. Path safety checks reject absolute
 paths, traversal, NUL bytes, symlinks, and paths outside the goal directories.
 
+Goal files, the pool snapshot and archives are read and written through
+`storage/safe-fs.ts`, anchored at `ctx.cwd`: every
+directory between the project and a file must be a real directory, final files
+are opened with `O_NOFOLLOW` and must be regular files, reads are bounded and
+taken from one descriptor whose identity is checked against the path, and
+directories Goal X creates are private to their owner. Replacement writes an
+exclusive, verified temporary file in a private directory and renames it over
+a regular target, so readers see the old or the new file and a replaced file
+keeps its permission bits; new files are private. Archives are published with a
+no-clobber hard link, then the exact active inode validated under the goal lock
+is claimed and removed, and a successor that appeared meanwhile is restored
+rather than deleted. A cold pool read serves the derived snapshot only when the
+goals directory is unchanged since it was written.
+
+This contract assumes a stable, private, user-owned project directory and
+cooperating Goal X instances. Node exposes no `openat`/`renameat`/`unlinkat` or
+conditional final-name operation, so protection against a hostile same-user
+process swapping a directory or file during an operation would need a native
+directory-descriptor layer and is not claimed.
+
 Old readers remain for backward-compatible reads of existing data:
 `readActiveGoalPool`, `readGoalLedger`, `mergeGoalPromptFromDisk`,
 `latestAuditorResultForGoal`, and `normalizeGoalRecord` are all retained and in

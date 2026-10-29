@@ -7,15 +7,15 @@ import {
 	archiveGoalFile,
 	atomicWriteGoalFile,
 	ensureDirectory,
-	mergeGoalPromptFromDisk,
-	parseGoalFile,
 	readActiveGoalPool,
  readActiveGoalPoolView,
+	readGoalFileSnapshotChecked,
 	resolveGoalPath,
 	safeUnlinkGoalFile,
 	sanitizeGoalPaths,
 	writeActiveGoalFile,
 	type GoalFileContext,
+	type GoalFileSnapshot,
 } from "./storage/goal-files.ts";
 import { acquireGoalLock, type GoalLock } from "./storage/goal-lock.ts";
 import { mergeFocusedGoalWithDisk } from "./goal-pool.ts";
@@ -218,7 +218,8 @@ export class GoalService {
 			return null;
 		}
 		try {
-   const freshDisk = this.readFreshDiskGoal(ctx, goal);
+   const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, goal);
+   const freshDisk = freshSnapshot?.goal ?? null;
    const expected = this.turnBase ?? goal;
    if (!freshDisk || (freshDisk.revision ?? 0) !== (expected.revision ?? 0)) {
     this.flushError = `Goal ${goal.id} changed in another process; buffered changes were rejected. Refresh and retry.`;
@@ -244,7 +245,7 @@ export class GoalService {
    const base = freshDisk;
 			const next = { ...goal, revision: (base.revision ?? 0) + 1 };
 			const written = this.turn.archive || next.status === "complete"
-				? archiveGoalFile(ctx, next)
+				? this.archiveValidated(ctx, next, freshSnapshot!)
 				: writeActiveGoalFile(ctx, next);
 			this.turn.active = false;
 			this.appendLedgerEventsBestEffort(ctx, this.turn.ledger);
@@ -376,15 +377,35 @@ export class GoalService {
 	 * Read the goal's authoritative active file directly (no complete-status
 	 * filter, unlike the pool reader) for the optimistic revision check under
 	 * the per-goal lock. Returns null when the file is gone (external
-	 * archive/delete) or the goal has no active path.
+	 * archive/delete) or the goal has no active path. An existing file that is
+	 * unreadable, unsafe or malformed throws instead of being mistaken for a
+	 * deletion, so pending changes stay pending and are retried.
 	 */
 	private readFreshDiskGoal(ctx: GoalServiceContext, current: GoalRecord): GoalRecord | null {
+		return this.readFreshDiskGoalSnapshot(ctx, current)?.goal ?? null;
+	}
+
+	private readFreshDiskGoalSnapshot(ctx: GoalServiceContext, current: GoalRecord): GoalFileSnapshot | null {
 		if (!current.activePath) return null;
+		const filePath = resolveGoalPath(ctx, GOALS_DIR, current.activePath);
 		try {
-			return parseGoalFile(resolveGoalPath(ctx, GOALS_DIR, current.activePath));
-		} catch {
-			return null;
+			const snapshot = readGoalFileSnapshotChecked(ctx, filePath);
+			if (!snapshot.goal) throw new Error(`Could not read a valid goal record from ${current.activePath}`);
+			return snapshot;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+			throw error;
 		}
+	}
+
+	/** Archive exactly the active file validated under the goal lock. */
+	private archiveValidated(ctx: GoalServiceContext, goal: GoalRecord, source: GoalFileSnapshot): GoalRecord {
+		return archiveGoalFile(ctx, goal, source, (error, quarantinePath) => this.ref.onDiagnostic({
+			severity: "warning",
+			source: "storage",
+			goalId: goal.id,
+			message: `Goal archive committed, but its private claim could not be removed; inspect and remove ${quarantinePath} manually: ${error instanceof Error ? error.message : String(error)}`,
+		}));
 	}
 
 	/**
@@ -472,8 +493,9 @@ export class GoalService {
 		const capturedRevision = current.revision ?? 0;
 		const lock = acquireGoalLock(ctx, current.id);
 		try {
-			const freshDisk = this.readFreshDiskGoal(ctx, current);
-			if (!freshDisk) {
+			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, current);
+			const freshDisk = freshSnapshot?.goal ?? null;
+			if (!freshSnapshot || !freshDisk) {
 				return { ok: false, message: `Goal ${current.id} was deleted or archived by another process while this mutation was in progress; the mutation was not applied.` };
 			}
 			const diskRevision = freshDisk.revision ?? 0;
@@ -482,7 +504,7 @@ export class GoalService {
 			}
 
 			// 3. mutation on a clone (after an optional authoritative objective merge).
-			const base = spec.refreshFromDisk ? mergeGoalPromptFromDisk(ctx, current) : current;
+			const base = spec.refreshFromDisk ? { ...current, objective: freshDisk.objective } : current;
 			const mutated = {
 				...spec.mutate(cloneGoal(base)),
 				revision: capturedRevision + 1,
@@ -490,7 +512,7 @@ export class GoalService {
 
 			// 4. authoritative file write (active or archive). A failure here throws
 			//    and prevents any memory/ledger/focus/archive commit.
-			const written = spec.archive ? archiveGoalFile(ctx, mutated) : writeActiveGoalFile(ctx, mutated);
+			const written = spec.archive ? this.archiveValidated(ctx, mutated, freshSnapshot) : writeActiveGoalFile(ctx, mutated);
 
 			// 5. ledger append best effort.
 			if (spec.ledger) {
@@ -683,7 +705,7 @@ export class GoalService {
 				}
 				return { ok: false, message: `Goal ${current.id} was modified by another process (revision ${capturedRevision} -> ${diskRevision}); current revision is ${diskRevision}. The task was not updated.` };
 			}
-			const base = mergeGoalPromptFromDisk(ctx, current);
+			const base = { ...current, objective: freshDisk.objective };
 			if (!base.taskList) {
 				return { ok: false, message: "The goal has no task list." };
 			}
@@ -756,15 +778,16 @@ export class GoalService {
 			return null;
 		}
 		try {
-			const freshDisk = this.readFreshDiskGoal(ctx, current);
-			if (!freshDisk) return null;
+			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, current);
+			const freshDisk = freshSnapshot?.goal ?? null;
+			if (!freshSnapshot || !freshDisk) return null;
 			if ((freshDisk.revision ?? 0) !== capturedRevision) {
 				// Revision moved concurrently: merge only the additive usage
 				// delta from this session onto the disk record and advance its
 				// revision. All other fields stay authoritative from disk.
 				const { tokens, seconds } = this.usageDelta(current, freshDisk);
 				if (tokens === 0 && seconds === 0) return null;
-				const merged = mergeGoalPromptFromDisk(ctx, {
+				const merged = {
 					...freshDisk,
 					usage: {
 						tokensUsed: freshDisk.usage.tokensUsed + tokens,
@@ -772,14 +795,14 @@ export class GoalService {
 					},
 					updatedAt: nowIso(),
 					revision: (freshDisk.revision ?? 0) + 1,
-				});
-				const written = merged.status === "complete" ? archiveGoalFile(ctx, merged) : writeActiveGoalFile(ctx, merged);
+				};
+				const written = merged.status === "complete" ? this.archiveValidated(ctx, merged, freshSnapshot) : writeActiveGoalFile(ctx, merged);
 				this.trackBaseline(written.id, written.usage);
 				this.ref.setFocused(written);
 				return written;
 			}
-			const merged = mergeGoalPromptFromDisk(ctx, { ...current, updatedAt: nowIso(), revision: capturedRevision + 1 });
-			const written = merged.status === "complete" ? archiveGoalFile(ctx, merged) : writeActiveGoalFile(ctx, merged);
+			const merged = { ...current, objective: freshDisk.objective, updatedAt: nowIso(), revision: capturedRevision + 1 };
+			const written = merged.status === "complete" ? this.archiveValidated(ctx, merged, freshSnapshot) : writeActiveGoalFile(ctx, merged);
 			this.trackBaseline(written.id, written.usage);
 			this.ref.setFocused(written);
 			return written;

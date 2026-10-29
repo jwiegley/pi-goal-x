@@ -1,7 +1,18 @@
 import { goalStoragePath, goalPoolSnapshotPath, isExternalGoalStorage, ensureGoalStorageDirectory, type GoalStorageContext } from "./goal-root.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { renameAtomic, renameAtomicSync } from "./atomic-rename.ts";
+import { createHash } from "node:crypto";
+import {
+	assertSafeFileAncestors,
+	atomicWriteRegularFile,
+	claimRegularFile,
+	discardClaimedRegularFile,
+	readRegularFile,
+	readRegularFileAsync,
+	restoreClaimedRegularFile,
+	sameRegularFile,
+	type RegularFileIdentity,
+} from "./safe-fs.ts";
 
 import {
 	formatDuration,
@@ -20,6 +31,15 @@ import {
 
 export const GOALS_DIR = ".pi/goals";
 export const ARCHIVED_GOALS_DIR = ".pi/goals/archived";
+export const MAX_CHECKED_GOAL_FILE_BYTES = 16 * 1024 * 1024;
+export const MAX_CHECKED_POOL_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+
+/** The bytes and identity of one goal file, read from a single checked descriptor. */
+export interface GoalFileSnapshot {
+	identity: RegularFileIdentity;
+	bytes: Buffer;
+	goal: GoalRecord | null;
+}
 
 /**
  * Per-file parse cache (P1-1): keyed by (absolute path, mtime, size), so
@@ -60,6 +80,8 @@ const goalPoolCache = new Map<string, Map<string, GoalRecord>>();
  */
 export function invalidateGoalPoolCache(): void {
 	goalPoolCache.clear();
+	goalFileParseCache.clear();
+	goalDirListingCache.clear();
 }
 
 function invalidateGoalPathCaches(filePath: string): void {
@@ -102,16 +124,18 @@ function poolSnapshotLegacyPath(root: string): string {
 
 /** Read + validate the snapshot; null when missing/corrupt/unsupported. */
 function readPoolSnapshotSync(ctx: GoalFileContext, root: string): PoolSnapshot | null {
-	const parsed = tryParsePoolSnapshotSync(goalPoolSnapshotPath(ctx));
+	const parsed = tryParsePoolSnapshotSync(ctx, goalPoolSnapshotPath(ctx));
 	if (parsed) return parsed;
 	// One-time migration fallback: a snapshot written before 2026-08-09 lives
 	// inside the goals dir; keep serving it until the next write replaces it.
-	return tryParsePoolSnapshotSync(poolSnapshotLegacyPath(root));
+	return tryParsePoolSnapshotSync(ctx, poolSnapshotLegacyPath(root));
 }
 
-function tryParsePoolSnapshotSync(filePath: string): PoolSnapshot | null {
+/** A derived snapshot is read as one bounded regular file below the project, never through a symlink. */
+function tryParsePoolSnapshotSync(ctx: GoalFileContext, filePath: string): PoolSnapshot | null {
 	try {
-		const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<PoolSnapshot>;
+		const bytes = readRegularFile(ctx.cwd, filePath, MAX_CHECKED_POOL_SNAPSHOT_BYTES).bytes;
+		const data = JSON.parse(bytes.toString("utf8")) as Partial<PoolSnapshot>;
 		if (data.version === 1 && Array.isArray(data.goals) && typeof data.dirMtimeMs === "number") {
 			return data as PoolSnapshot;
 		}
@@ -122,21 +146,7 @@ function tryParsePoolSnapshotSync(filePath: string): PoolSnapshot | null {
 }
 
 async function readPoolSnapshotAsync(ctx: GoalFileContext, root: string): Promise<PoolSnapshot | null> {
-	const parsed = await tryParsePoolSnapshotAsync(goalPoolSnapshotPath(ctx));
-	if (parsed) return parsed;
-	return tryParsePoolSnapshotAsync(poolSnapshotLegacyPath(root));
-}
-
-async function tryParsePoolSnapshotAsync(filePath: string): Promise<PoolSnapshot | null> {
-	try {
-		const data = JSON.parse(await fs.promises.readFile(filePath, "utf8")) as Partial<PoolSnapshot>;
-		if (data.version === 1 && Array.isArray(data.goals) && typeof data.dirMtimeMs === "number") {
-			return data as PoolSnapshot;
-		}
-	} catch {
-		return null;
-	}
-	return null;
+	return readPoolSnapshotSync(ctx, root);
 }
 
 function hydratePoolFromSnapshot(snapshot: PoolSnapshot): Map<string, GoalRecord> {
@@ -148,37 +158,26 @@ function hydratePoolFromSnapshot(snapshot: PoolSnapshot): Map<string, GoalRecord
 	return pool;
 }
 
-/** Best-effort atomic snapshot write (temp + rename). */
+/** Atomic snapshot write used by both best-effort and checked callers. */
+function writePoolSnapshotSyncChecked(ctx: GoalFileContext, root: string, goals: GoalRecord[]): void {
+	const rootStat = fs.lstatSync(root);
+	const snapshot: PoolSnapshot = { version: 1, dirMtimeMs: rootStat.mtimeMs, goals };
+	if (isExternalGoalStorage(ctx)) ensureGoalStorageDirectory(ctx, ".pi/goals/.metadata");
+	atomicWriteRegularFile(ctx.cwd, goalPoolSnapshotPath(ctx), Buffer.from(JSON.stringify(snapshot), "utf8"));
+	removeLegacyPoolSnapshot(root);
+}
+
+/** Best-effort atomic snapshot write through a private exclusive temp file. */
 function writePoolSnapshotSync(ctx: GoalFileContext, root: string, goals: GoalRecord[]): void {
 	try {
-		const rootStat = fs.lstatSync(root);
-		const snapshot: PoolSnapshot = { version: 1, dirMtimeMs: rootStat.mtimeMs, goals };
-		if (isExternalGoalStorage(ctx)) ensureGoalStorageDirectory(ctx, ".pi/goals/.metadata");
-		const target = goalPoolSnapshotPath(ctx);
-		const tempPath = `${target}.${process.pid}.${Date.now()}.tmp`;
-		fs.writeFileSync(tempPath, JSON.stringify(snapshot), "utf8");
-		try { renameAtomicSync(tempPath, target); }
-		catch (error) { try { fs.unlinkSync(tempPath); } catch { /* best effort */ } throw error; }
-		removeLegacyPoolSnapshot(root);
+		writePoolSnapshotSyncChecked(ctx, root, goals);
 	} catch {
 		// best-effort: a missing/stale snapshot just costs a full scan next cold read
 	}
 }
 
 async function writePoolSnapshotAsync(ctx: GoalFileContext, root: string, goals: GoalRecord[]): Promise<void> {
-	try {
-		const rootStat = await fs.promises.lstat(root);
-		const snapshot: PoolSnapshot = { version: 1, dirMtimeMs: rootStat.mtimeMs, goals };
-		if (isExternalGoalStorage(ctx)) ensureGoalStorageDirectory(ctx, ".pi/goals/.metadata");
-		const target = goalPoolSnapshotPath(ctx);
-		const tempPath = `${target}.${process.pid}.${Date.now()}.tmp`;
-		await fs.promises.writeFile(tempPath, JSON.stringify(snapshot), "utf8");
-		try { await renameAtomic(tempPath, target); }
-		catch (error) { try { await fs.promises.unlink(tempPath); } catch { /* best effort */ } throw error; }
-		removeLegacyPoolSnapshot(root);
-	} catch {
-		// best-effort
-	}
+	writePoolSnapshotSync(ctx, root, goals);
 }
 
 /** Merge a delta (written goal or removal) into the persisted snapshot. */
@@ -190,11 +189,7 @@ function updatePoolSnapshotSync(ctx: GoalFileContext, root: string, mutate: (goa
 		const rootStat = fs.lstatSync(root);
 		snapshot.dirMtimeMs = rootStat.mtimeMs;
 		if (isExternalGoalStorage(ctx)) ensureGoalStorageDirectory(ctx, ".pi/goals/.metadata");
-		const target = goalPoolSnapshotPath(ctx);
-		const tempPath = `${target}.${process.pid}.${Date.now()}.tmp`;
-		fs.writeFileSync(tempPath, JSON.stringify(snapshot), "utf8");
-		try { renameAtomicSync(tempPath, target); }
-		catch (error) { try { fs.unlinkSync(tempPath); } catch { /* best effort */ } throw error; }
+		atomicWriteRegularFile(ctx.cwd, goalPoolSnapshotPath(ctx), Buffer.from(JSON.stringify(snapshot), "utf8"));
 		removeLegacyPoolSnapshot(root);
 	} catch {
 		// best-effort
@@ -271,30 +266,22 @@ export function resolveGoalPath(ctx: GoalFileContext, rootRel: string, relPath: 
 	return absolutePath;
 }
 
-export function atomicWriteGoalFile(ctx: GoalFileContext, rootRel: string, relPath: string, content: string): void {
+/**
+ * Replace (or, with `replace: false`, publish without clobbering) one goal file.
+ * The bytes go through an exclusive, verified temporary file in a private
+ * directory below the project; symlinked components and non-regular targets
+ * are refused. See storage/safe-fs.ts for the trust boundary.
+ */
+export function atomicWriteGoalFile(
+	ctx: GoalFileContext,
+	rootRel: string,
+	relPath: string,
+	content: string,
+	options: { replace?: boolean } = {},
+): void {
 	ensureDirectory(ctx, rootRel);
 	const filePath = resolveGoalPath(ctx, rootRel, relPath);
-	const prior = statIfPresent(filePath);
-	if (prior?.isSymbolicLink()) {
-		throw new Error(`Refusing to write symlinked goal file: ${relPath}`);
-	}
-	const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-	let fd: number | undefined;
-	let created = false;
-	try {
-		fd = fs.openSync(tempPath, "wx", prior ? prior.mode & 0o777 : 0o666);
-		created = true;
-		// open() applies the process umask even when replacing an existing file.
-		if (prior && process.platform !== "win32" && (prior.mode & 0o777 & process.umask())) fs.fchmodSync(fd, prior.mode & 0o777);
-		fs.writeFileSync(fd, content, "utf8");
-		fs.closeSync(fd);
-		fd = undefined;
-		renameAtomicSync(tempPath, filePath);
-	} catch (error) {
-		if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* best effort */ } }
-		if (created) { try { fs.unlinkSync(tempPath); } catch { /* best effort */ } }
-		throw error;
-	}
+	atomicWriteRegularFile(ctx.cwd, filePath, Buffer.from(content, "utf8"), options);
 	invalidateGoalPathCaches(filePath);
 	invalidateGoalDirCache(goalStoragePath(ctx, rootRel));
 }
@@ -305,17 +292,23 @@ function statIfPresent(filePath: string): fs.Stats | undefined {
 	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
-export function safeUnlinkGoalFile(ctx: GoalFileContext, rootRel: string, relPath: string): void {
+export function safeUnlinkGoalFile(ctx: GoalFileContext, rootRel: string, relPath: string, goalId?: string): void {
+	if (rootRel === GOALS_DIR && !isSafeActivePath(ctx, relPath)) {
+		throw new Error(`Refusing to unlink invalid active goal path: ${relPath}`);
+	}
 	const filePath = resolveGoalPath(ctx, rootRel, relPath);
+	assertSafeFileAncestors(ctx.cwd, filePath);
 	const stat = statIfPresent(filePath);
-	if (stat && !stat.isSymbolicLink()) {
+	if (stat && stat.isFile()) {
 		fs.unlinkSync(filePath);
 		invalidateGoalPathCaches(filePath);
 		invalidateGoalDirCache(goalStoragePath(ctx, rootRel));
 		if (rootRel === GOALS_DIR) {
 			const root = goalStoragePath(ctx, GOALS_DIR);
 			const normalized = normalizeRelPath(relPath);
-			updatePoolSnapshotSync(ctx, root, (goals) => goals.filter((g) => normalizeRelPath(g.activePath ?? "") !== normalized));
+			updatePoolSnapshotSync(ctx, root, (goals) => goals.filter((g) =>
+				(goalId === undefined || g.id !== goalId)
+				&& normalizeRelPath(g.activePath ?? "") !== normalized));
 		}
 	}
 }
@@ -334,6 +327,18 @@ export function activePathForGoal(ctx: GoalFileContext, goal: GoalRecord): strin
 
 export function archivedPathForGoal(ctx: GoalFileContext, goal: GoalRecord): string {
 	return isSafeArchivedPath(ctx, goal.archivedPath) ? goal.archivedPath : makeArchivedGoalPath(goal);
+}
+
+/** The exact archived record produced for `current` when it is archived at `archivedAt`. */
+export function recoveredArchivedGoal(
+	ctx: GoalFileContext,
+	current: GoalRecord,
+	archivedAt: string,
+	archivedPath = archivedPathForGoal(ctx, current),
+): GoalRecord {
+	const next = sanitizeGoalPaths(ctx, { ...current, archivedPath, updatedAt: archivedAt });
+	delete next.activePath;
+	return next;
 }
 
 function taskCheckbox(status: TaskStatus): string {
@@ -438,7 +443,7 @@ export function parseGoalFile(filePath: string): GoalRecord | null {
 		goalFileParseCache.delete(filePath);
 		return null;
 	}
-	if (stat.isSymbolicLink()) return null;
+	if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_CHECKED_GOAL_FILE_BYTES) return null;
 	const cached = goalFileParseCache.get(filePath);
 	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
 		return cached.parsed;
@@ -450,6 +455,53 @@ export function parseGoalFile(filePath: string): GoalRecord | null {
 		return null;
 	}
 	return parseGoalContentCached(filePath, stat.mtimeMs, stat.size, content);
+}
+
+/**
+ * Fresh goal-file parse for paths that must distinguish malformed content
+ * (null) from an lstat/read failure (throw). It always reads the current
+ * bytes through one checked descriptor, then refreshes the parse cache.
+ */
+export function parseGoalFileChecked(ctx: GoalFileContext, filePath: string): GoalRecord | null {
+	const file = readRegularFile(ctx.cwd, filePath, MAX_CHECKED_GOAL_FILE_BYTES);
+	return parseGoalContentCached(filePath, file.mtimeMs, file.size, file.bytes.toString("utf8"));
+}
+
+/** Bounded parse tied to the exact regular-file descriptor whose bytes it returns. */
+export function readGoalFileSnapshotChecked(ctx: GoalFileContext, filePath: string): GoalFileSnapshot {
+	const file = readRegularFile(ctx.cwd, filePath, MAX_CHECKED_GOAL_FILE_BYTES);
+	return {
+		identity: file,
+		bytes: file.bytes,
+		goal: parseGoalContentCached(filePath, file.mtimeMs, file.size, file.bytes.toString("utf8")),
+	};
+}
+
+export function sameGoalFileSnapshot(left: GoalFileSnapshot, right: GoalFileSnapshot): boolean {
+	return sameRegularFile(left.identity, right.identity) && left.bytes.equals(right.bytes);
+}
+
+/**
+ * Archival cannot safely publish a remove-only snapshot delta: a successor may
+ * claim the just-vacated active pathname at any time. Drop both derived
+ * snapshot generations so the next pool read scans authoritative files and
+ * cannot hide that successor.
+ */
+function discardArchivedPoolSnapshots(ctx: GoalFileContext, filePath: string): void {
+	invalidateGoalPathCaches(filePath);
+	const root = goalStoragePath(ctx, GOALS_DIR);
+	invalidateGoalPoolCache();
+	invalidateGoalDirCache(root);
+	for (const snapshotPath of [goalPoolSnapshotPath(ctx), poolSnapshotLegacyPath(root)]) {
+		try {
+			assertSafeFileAncestors(ctx.cwd, snapshotPath);
+			fs.unlinkSync(snapshotPath);
+		} catch {
+			// Snapshots are derived. The authoritative goals-directory rename has
+			// already changed its mtime, so a surviving snapshot will fail freshness
+			// validation; never turn committed archival into a reported failure.
+		}
+	}
 }
 
 /**
@@ -484,30 +536,117 @@ export function writeActiveGoalFile(ctx: GoalFileContext, current: GoalRecord): 
 	return next;
 }
 
-export function archiveGoalFile(ctx: GoalFileContext, current: GoalRecord): GoalRecord {
+/**
+ * Archive the active goal file whose bytes and identity the caller validated
+ * (normally under the goal lock) as `expectedSource`; without one, the file
+ * as read at the start of archival must still describe `current`.
+ *
+ * The archive is published first, without clobbering an existing archive, so
+ * a crash always leaves the active record or its archive visible. Then the
+ * exact active inode is claimed by renaming it into a private directory and
+ * compared with `expectedSource`; a replacement written by another writer is
+ * restored (never deleted) and the archive fails. A byte-exact archive left
+ * by an interrupted earlier attempt is adopted instead of failing every retry.
+ * Committed archival never turns into a failure: a private claim that cannot
+ * be removed is reported through `onCleanupFailure` for manual cleanup.
+ */
+export function archiveGoalFile(
+	ctx: GoalFileContext,
+	current: GoalRecord,
+	expectedSource?: GoalFileSnapshot,
+	onCleanupFailure: (error: unknown, quarantinePath: string) => void = () => {},
+): GoalRecord {
+	if (!isSafeActivePath(ctx, current.activePath)) {
+		throw new Error(`Cannot archive goal ${current.id}: active path is missing or unsafe.`);
+	}
+	const sourcePath = resolveGoalPath(ctx, GOALS_DIR, current.activePath);
+	const observed = readGoalFileSnapshotChecked(ctx, sourcePath);
+	// Without a caller-validated snapshot, archive the bytes observed now.
+	expectedSource ??= observed;
+	if (!sameGoalFileSnapshot(observed, expectedSource)) {
+		throw new Error(`Cannot archive goal ${current.id}: active file changed before archival.`);
+	}
+	const sourceRevision = expectedSource.goal?.revision ?? 0;
+	const currentRevision = current.revision ?? 0;
+	if (
+		!expectedSource.goal
+		|| expectedSource.goal.id !== current.id
+		|| expectedSource.goal.activePath !== current.activePath
+		|| (currentRevision !== sourceRevision && currentRevision !== sourceRevision + 1)
+	) {
+		throw new Error(`Cannot archive goal ${current.id}: active file no longer matches.`);
+	}
 	const archivedPath = archivedPathForGoal(ctx, current);
-	const next = sanitizeGoalPaths(ctx, { ...current, archivedPath, updatedAt: nowIso() });
+	let next = sanitizeGoalPaths(ctx, { ...current, archivedPath, updatedAt: nowIso() });
 	delete next.activePath;
-	atomicWriteGoalFile(ctx, ARCHIVED_GOALS_DIR, archivedPath, serializeGoalFile(next));
-	if (isSafeActivePath(ctx, current.activePath)) {
+	try {
+		atomicWriteGoalFile(ctx, ARCHIVED_GOALS_DIR, archivedPath, serializeGoalFile(next), { replace: false });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		// A crash may have published this exact logical archive before removing the
+		// active name. Accept only a byte-exact reconstruction using the archive's
+		// persisted timestamp; unrelated collisions remain hard failures.
+		const existing = readGoalFileSnapshotChecked(ctx, resolveGoalPath(ctx, ARCHIVED_GOALS_DIR, archivedPath));
+		if (!existing.goal) throw error;
+		const expectedExisting = recoveredArchivedGoal(ctx, current, existing.goal.updatedAt, archivedPath);
+		if (existing.bytes.equals(Buffer.from(serializeGoalFile(expectedExisting), "utf8"))) {
+			next = existing.goal;
+		} else if (existing.goal.id === current.id && current.archivedPath === undefined) {
+			// An earlier publish-before-remove attempt may have archived an older
+			// version at the timestamp-derived name. Preserve it and publish this
+			// version at a deterministic content-qualified name so the failed
+			// attempt cannot poison every retry.
+			const suffix = createHash("sha256").update(serializeGoalFile(current)).digest("hex").slice(0, 16);
+			const qualifiedPath = archivedPath.endsWith(".md") ? `${archivedPath.slice(0, -3)}_${suffix}.md` : `${archivedPath}_${suffix}`;
+			next = sanitizeGoalPaths(ctx, { ...next, archivedPath: qualifiedPath });
+			try {
+				atomicWriteGoalFile(ctx, ARCHIVED_GOALS_DIR, qualifiedPath, serializeGoalFile(next), { replace: false });
+			} catch (qualifiedError) {
+				if ((qualifiedError as NodeJS.ErrnoException).code !== "EEXIST") throw qualifiedError;
+				const qualifiedExisting = readGoalFileSnapshotChecked(ctx, resolveGoalPath(ctx, ARCHIVED_GOALS_DIR, qualifiedPath));
+				if (!qualifiedExisting.goal) throw qualifiedError;
+				const expectedQualified = recoveredArchivedGoal(ctx, current, qualifiedExisting.goal.updatedAt, qualifiedPath);
+				if (!qualifiedExisting.bytes.equals(Buffer.from(serializeGoalFile(expectedQualified), "utf8"))) throw qualifiedError;
+				next = qualifiedExisting.goal;
+			}
+		} else {
+			throw error;
+		}
+	}
+
+	// Claim the exact inode read above; a replacement is restored and reported
+	// instead of being deleted by pathname.
+	const claim = claimRegularFile(ctx.cwd, sourcePath, MAX_CHECKED_GOAL_FILE_BYTES, "archive");
+	if (!sameRegularFile(expectedSource.identity, claim.file) || !expectedSource.bytes.equals(claim.file.bytes)) {
 		try {
-			safeUnlinkGoalFile(ctx, GOALS_DIR, current.activePath);
+			restoreClaimedRegularFile(ctx.cwd, sourcePath, claim);
+		} catch {
+			// A successor owns the canonical path. Preserve the mismatched private
+			// claim for manual recovery and never overwrite or delete the successor.
+		}
+		throw new Error(`Cannot archive goal ${current.id}: active file changed while being claimed.`);
+	}
+	try {
+		discardClaimedRegularFile(ctx.cwd, claim);
+	} catch (error) {
+		// Archive publication and the exact-inode claim are already committed.
+		// Keep the private name for manual cleanup instead of inviting a retry
+		// that cannot find the removed active source.
+		try {
+			onCleanupFailure(error, claim.quarantinePath);
 		} catch {}
 	}
+	discardArchivedPoolSnapshots(ctx, sourcePath);
 	return next;
 }
 
 export function mergeGoalPromptFromDisk(ctx: GoalFileContext, current: GoalRecord): GoalRecord {
 	if (!isSafeActivePath(ctx, current.activePath)) return current;
-	// NAF: the zero-op pool cache is the session view of the parsed goal file
-	// (invalidated on every extension write) — source the objective from it so
-	// the per-turn merge is 0 fs ops. When the cache is empty (cold or just
-	// invalidated by a write), fall back to the mtime-keyed direct parse.
-	const root = goalStoragePath(ctx, GOALS_DIR);
-	const cached = goalPoolCache.get(root)?.get(current.id);
-	if (cached) return { ...current, objective: cached.objective };
+	// Prompt text is a supported hand-edit surface. Read the exact active file
+	// here instead of the directory-level pool cache, which may legitimately
+	// lag an external body edit.
 	try {
-		const parsed = parseGoalFile(resolveGoalPath(ctx, GOALS_DIR, current.activePath));
+		const parsed = parseGoalFileChecked(ctx, resolveGoalPath(ctx, GOALS_DIR, current.activePath));
 		if (!parsed) return current;
 		return { ...current, objective: parsed.objective };
 	} catch {
@@ -527,7 +666,7 @@ export function readActiveGoalFiles(ctx: GoalFileContext): GoalRecord[] {
 }
 
 /** Uncached full scan (used when the zero-op pool cache is empty). */
-function scanActiveGoalFiles(ctx: GoalFileContext, root: string): GoalRecord[] {
+function scanActiveGoalFiles(ctx: GoalFileContext, root: string, options: { surfaceIoErrors?: boolean } = {}): GoalRecord[] {
 	let entries: string[];
 	try {
 		const rootStat = fs.lstatSync(root);
@@ -542,18 +681,39 @@ function scanActiveGoalFiles(ctx: GoalFileContext, root: string): GoalRecord[] {
 			goalDirListingCache.set(root, { mtimeMs: rootStat.mtimeMs, names: entries });
 		}
 	} catch (error) {
-		if (isExternalGoalStorage(ctx)) throw error;
+		if (options.surfaceIoErrors || isExternalGoalStorage(ctx)) throw error;
 		return [];
 	}
 	return entries
 		.map((name) => {
 			const relPath = `${GOALS_DIR}/${name}`;
 			if (!isSafeActivePath(ctx, relPath)) return null;
-			const parsed = parseGoalFile(resolveGoalPath(ctx, GOALS_DIR, relPath));
+			let parsed: GoalRecord | null;
+			try {
+				parsed = parseGoalFileChecked(ctx, resolveGoalPath(ctx, GOALS_DIR, relPath));
+			} catch (error) {
+				if (options.surfaceIoErrors) throw error;
+				return null;
+			}
 			if (!parsed || parsed.status === "complete") return null;
 			return sanitizeGoalPaths(ctx, { ...parsed, activePath: relPath });
 		})
 		.filter((goal): goal is GoalRecord => goal !== null);
+}
+
+/**
+ * Rebuild and persist the derived pool snapshot, surfacing scan and write
+ * errors, so a caller never reports a snapshot repaired until the
+ * replacement is visible on disk.
+ */
+export function refreshActiveGoalPoolSnapshot(ctx: GoalFileContext): void {
+	const root = goalStoragePath(ctx, GOALS_DIR);
+	invalidateGoalPoolCache();
+	const goals = scanActiveGoalFiles(ctx, root, { surfaceIoErrors: true });
+	writePoolSnapshotSyncChecked(ctx, root, goals);
+	const pool = new Map<string, GoalRecord>();
+	for (const goal of goals) pool.set(goal.id, goal);
+	goalPoolCache.set(root, pool);
 }
 
 export function readActiveGoalPoolView(ctx: GoalFileContext): ReadonlyMap<string, GoalRecord> {
@@ -569,10 +729,11 @@ export function readActiveGoalPool(ctx: GoalFileContext): Map<string, GoalRecord
 	return new Map(readActiveGoalPoolView(ctx));
 }
 
-/** Cold pool read: serve the persisted snapshot when the goals dir is unchanged (2 ops),
- * or when only non-goal entries changed (ledger churn: one extra readdir to verify the
- * active_goal filename set is identical — catches external add/remove). Otherwise full
- * scan + re-snapshot (external goal add/remove or no snapshot yet). */
+/** Cold pool read: serve the persisted snapshot only when the goals directory is
+ * unchanged since it was written. Filename equality is not enough: an atomic
+ * save replaces an active record by rename without changing its basename, so
+ * another process's write would otherwise hide behind a stale snapshot.
+ * Otherwise full scan + re-snapshot. */
 function readPoolWithSnapshotSync(ctx: GoalFileContext, root: string): Map<string, GoalRecord> {
 	let rootStat: fs.Stats | null = null;
 	try {
@@ -583,7 +744,7 @@ function readPoolWithSnapshotSync(ctx: GoalFileContext, root: string): Map<strin
 	if (rootStat && !rootStat.isSymbolicLink()) {
 		const snapshot = readPoolSnapshotSync(ctx, root);
 		if (snapshot) {
-			if (snapshot.dirMtimeMs === rootStat.mtimeMs || activeGoalNamesMatchSync(root, snapshot)) {
+			if (snapshot.dirMtimeMs === rootStat.mtimeMs) {
 				return hydratePoolFromSnapshot(snapshot);
 			}
 		}
@@ -596,35 +757,10 @@ function readPoolWithSnapshotSync(ctx: GoalFileContext, root: string): Map<strin
 	return pool;
 }
 
-/** True when the snapshot's goal filename set equals the goals dir's active_goal files. */
-function activeGoalNamesMatchSync(root: string, snapshot: PoolSnapshot): boolean {
-	try {
-		return activeGoalNamesMatch(fs.readdirSync(root), snapshot);
-	} catch {
-		return false;
-	}
-}
-
-async function activeGoalNamesMatchAsync(root: string, snapshot: PoolSnapshot): Promise<boolean> {
-	try {
-		return activeGoalNamesMatch(await fs.promises.readdir(root), snapshot);
-	} catch {
-		return false;
-	}
-}
-
-function activeGoalNamesMatch(names: string[], snapshot: PoolSnapshot): boolean {
-	const remaining = new Set(names.filter(name => /^active_goal_.*\.md$/.test(name)));
-	for (const goal of snapshot.goals) {
-		const name = path.posix.basename(normalizeRelPath(goal.activePath ?? ""));
-		if (/^active_goal_.*\.md$/.test(name) && !remaining.delete(name)) return false;
-	}
-	return remaining.size === 0;
-}
-
 /**
- * Parallel pool read (P1-7): fs.promises-based readdir + per-file stat/read
- * in parallel, seeding the P1-1 parse cache so subsequent sync reads hit it.
+ * Parallel pool read (P1-7): fs.promises-based readdir + bounded per-file
+ * descriptor reads in parallel, seeding the P1-1 parse cache so subsequent
+ * sync reads hit it.
  * Used by session startup rehydration (loadState). NAF: serves the zero-op
  * pool cache when present; a cold read populates it so subsequent sync reads
  * (reconcile, get_goal, prompts) are zero-op.
@@ -648,7 +784,7 @@ async function readPoolWithSnapshotAsync(ctx: GoalFileContext, root: string): Pr
 	if (rootStat && !rootStat.isSymbolicLink()) {
 		const snapshot = await readPoolSnapshotAsync(ctx, root);
 		if (snapshot) {
-			if (snapshot.dirMtimeMs === rootStat.mtimeMs || (await activeGoalNamesMatchAsync(root, snapshot))) {
+			if (snapshot.dirMtimeMs === rootStat.mtimeMs) {
 				return hydratePoolFromSnapshot(snapshot);
 			}
 		}
@@ -675,12 +811,8 @@ async function scanActiveGoalFilesAsync(ctx: GoalFileContext, root: string): Pro
 		if (!isSafeActivePath(ctx, relPath)) return null;
 		const abs = resolveGoalPath(ctx, GOALS_DIR, relPath);
 		try {
-			const [stat, content] = await Promise.all([
-				fs.promises.lstat(abs),
-				fs.promises.readFile(abs, "utf8"),
-			]);
-			if (stat.isSymbolicLink()) return null;
-			const parsed = parseGoalContentCached(abs, stat.mtimeMs, stat.size, content);
+			const file = await readRegularFileAsync(ctx.cwd, abs, MAX_CHECKED_GOAL_FILE_BYTES);
+			const parsed = parseGoalContentCached(abs, file.mtimeMs, file.size, file.bytes.toString("utf8"));
 			if (!parsed || parsed.status === "complete") return null;
 			return sanitizeGoalPaths(ctx, { ...parsed, activePath: relPath });
 		} catch {

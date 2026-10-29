@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadSettingsSnapshot } from "../goal-settings.ts";
+import { assertSafeFileAncestors, ensureSafeDirectory } from "./safe-fs.ts";
 
 export interface GoalStorageContext {
 	cwd: string;
@@ -100,21 +101,20 @@ export function goalPoolSnapshotPath(ctx: GoalStorageContext): string {
 		: path.join(root, ".metadata", ".goals-pool-snapshot.json");
 }
 
-/** Validate managed ancestors on writes, without adding I/O to steady-state reads. */
-export function ensureGoalStorageDirectory(ctx: GoalStorageContext, logical: string, verifyDefault = true): void {
+/**
+ * Ensure a managed goal directory below the project without following a
+ * symlinked or non-directory component anywhere between ctx.cwd and it.
+ * Directories created here are private to their owner.
+ */
+export function ensureGoalStorageDirectory(ctx: GoalStorageContext, logical: string): void {
 	const root = goalStorageRoot(ctx);
 	const target = goalStoragePath(ctx, logical);
 	if (root === path.resolve(ctx.cwd, ".pi/goals")) {
-		fs.mkdirSync(target, { recursive: true });
-		if (verifyDefault && fs.lstatSync(target).isSymbolicLink()) throw new Error(`Goal directory is a symlink: ${target}`);
+		ensureSafeDirectory(ctx.cwd, target);
 		return;
 	}
-	// An external pool removed during a session must not silently reappear.
-	if (fs.lstatSync(root).isSymbolicLink()) throw new Error(`Goal root is a symlink: ${root}`);
-	let dir = root;
-	for (const part of path.relative(root, target).split(path.sep).filter(Boolean)) {
-		dir = path.join(dir, part);
-		try { fs.mkdirSync(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-		if (fs.lstatSync(dir).isSymbolicLink()) throw new Error(`Goal directory is a symlink: ${dir}`);
-	}
+	// An external pool removed during a session must not silently reappear:
+	// require the configured root itself, then create only below it.
+	assertSafeFileAncestors(ctx.cwd, path.join(root, ".goal-root"));
+	ensureSafeDirectory(root, target);
 }

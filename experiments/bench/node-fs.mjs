@@ -37,6 +37,8 @@ const SYNC_OPS = [
 	"renameSync",
 	"unlinkSync",
 	"openSync", "closeSync", "readSync", "writeSync", "fsyncSync",
+	// descriptor-checked storage (storage/safe-fs.ts):
+	"fstatSync", "fchmodSync", "linkSync", "rmdirSync",
 	// used by harness fixture setup only:
 	"mkdtempSync",
 	"rmSync",
@@ -82,6 +84,10 @@ export const closeSync = wrapSync("closeSync");
 export const readSync = wrapSync("readSync");
 export const writeSync = wrapSync("writeSync");
 export const fsyncSync = wrapSync("fsyncSync");
+export const fstatSync = wrapSync("fstatSync");
+export const fchmodSync = wrapSync("fchmodSync");
+export const linkSync = wrapSync("linkSync");
+export const rmdirSync = wrapSync("rmdirSync");
 export const readFile = real.readFile;
 export const writeFile = real.writeFile;
 export const appendFile = real.appendFile;
