@@ -12,7 +12,7 @@ import { buildGoalHistoryBlock, buildGoalTaskDetailBlock, detailedSummary, goalD
 import { modelBudgetLine } from "./goal-accounting.ts";
 import { buildGoalCreatedReport, buildTaskSummary, sisyphusStepProgress } from "./goal-policy.ts";
 import { buildUnfocusedOpenGoalsSummary, otherOpenGoalCount } from "./goal-pool.ts";
-import { readGoalLedger } from "./goal-ledger.ts";
+import { MAX_GOAL_INDEX_EVENTS, readGoalLedgerForGoal } from "./goal-ledger.ts";
 import { loadGoalSettings } from "./settings/resolve.ts";
 import { deriveTasksFromObjective } from "./goal-task-derive.ts";
 import { type GoalRecord, type GoalTask, validateTokenBudgetInput } from "./goal-record.ts";
@@ -100,7 +100,7 @@ function verboseGoalLines(core: CoreToolsCore, ctx: ExtensionContext, view: Goal
 	lines.push("Lifecycle: call update_goal({status: \"complete\"}) only when every requirement is satisfied — the independent auditor verifies from actual evidence. Call update_goal({status: \"blocked\"}) only after the same blocker recurs on three consecutive goal turns. User commands handle pause/resume/clear/focus.");
 	// E1: goal history (last audit verdict + recent lifecycle events).
 	if (includeHistory) {
-		const history = buildGoalHistoryBlock(view, readGoalLedger(ctx).events);
+		const history = buildGoalHistoryBlock(view, readGoalLedgerForGoal(ctx, view.id).events);
 		if (history) lines.push("", history);
 	}
 	return lines;
@@ -129,7 +129,7 @@ function compactGoalLines(core: CoreToolsCore, ctx: ExtensionContext, view: Goal
 		lines.push(`Blocker: ${view.pauseReason}`);
 	}
 	if (includeHistory) {
-		const history = buildGoalHistoryBlock(view, readGoalLedger(ctx).events);
+		const history = buildGoalHistoryBlock(view, readGoalLedgerForGoal(ctx, view.id).events);
 		if (history) lines.push(history);
 	}
 	return lines;
@@ -175,9 +175,10 @@ export function registerCoreTools(
 			}
 			if (params.section && params.section !== "summary") {
 				if (!["objective", "tasks", "history"].includes(params.section)) return goalTextResult("Unknown goal section.", view);
-				const history = params.section === "history" ? readGoalLedger(ctx) : undefined;
+				const history = params.section === "history" ? readGoalLedgerForGoal(ctx, view.id, { maxEvents: MAX_GOAL_INDEX_EVENTS }) : undefined;
 				const page = goalDetailPage(view, {section: params.section, task_id: taskId, cursor: params.cursor}, history?.events, history?.revision);
-				return {content: [{type: "text", text: page.text}], details: {...goalDetails(view), ...(page.ok ? {page: {content: page.content, nextCursor: page.nextCursor, totalChars: page.totalChars}} : {})}};
+				const text = history?.truncated ? `Earlier history lies outside the retained window.\n\n${page.text}` : page.text;
+				return {content: [{type: "text", text}], details: {...goalDetails(view), ...(page.ok ? {page: {content: page.content, nextCursor: page.nextCursor, totalChars: page.totalChars}} : {})}};
 			}
 			if (params.cursor || taskId) return goalTextResult("Use section=objective, tasks, or history for detail retrieval; task_id requires tasks.", view);
 			const lines = verbose && !params.section

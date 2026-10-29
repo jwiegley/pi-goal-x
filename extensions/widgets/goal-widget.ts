@@ -255,14 +255,17 @@ export class GoalWidgetComponent implements Component {
 		if (auditResult) {
 			return clampLinesToWidth(renderAuditResultCardView(auditResult, this.theme, width), width);
 		}
-		const model = this.currentModel(settings);
-		const lines = renderGoalWidgetLines(this.getGoal(), this.theme, Math.max(1, width), {
+		const goal = this.getGoal();
+		const auditorProgress = this.getAuditorProgress();
+		const ledgerEvents = goal && !auditorProgress ? this.getLedgerEvents() : [];
+		const model = auditorProgress ? null : this.currentModel(settings, ledgerEvents);
+		const lines = renderGoalWidgetLines(goal, this.theme, Math.max(1, width), {
 			openGoalCount: this.getOpenGoalCount(),
-			auditorProgress: this.getAuditorProgress(),
+			auditorProgress,
 			disableTasks: settings.disableTasks,
 			stalled: this.getStalled(),
 			expanded: this.getExpanded(),
-			ledgerEvents: this.getLedgerEvents(),
+			ledgerEvents,
 			model,
 			compactScrollOffset: this.scroll.compactOffset,
 			expandedScrollOffset: this.scroll.expandedOffset,
@@ -294,12 +297,12 @@ export class GoalWidgetComponent implements Component {
 		return [goal?.id ?? "∅", goal?.status ?? "∅", stateKind, String(this.getExpanded()), String(settings.disableTasks === true), String(hasTasks)].join("|");
 	}
 
-	private currentModel(settings: GoalSettings): GoalDashboardModel | null {
+	private currentModel(settings: GoalSettings, ledgerEvents?: GoalLedgerEvent[]): GoalDashboardModel | null {
 		const goal = this.getGoal();
 		const model = goal ? deriveGoalDashboardModel(goal as GoalRecord, {
 			focused: true,
 			otherOpenGoals: Math.max(0, this.getOpenGoalCount() - 1),
-			ledgerEvents: this.getLedgerEvents(),
+			ledgerEvents: ledgerEvents ?? this.getLedgerEvents(),
 			tasksDisabled: settings.disableTasks === true,
 			maxAutonomousRuns: settings.maxAutonomousRuns,
 			idleContinuationBackoff: settings.idleContinuationBackoff,

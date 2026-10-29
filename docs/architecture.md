@@ -123,16 +123,15 @@ All files are in `extensions/`.
 
 | File | Responsibility |
 |---|---|
-| `goal-ledger.ts` | Append and read the JSONL ledger, with a cache; re-exports the pieces below |
+| `goal-ledger.ts` | Append and stream the JSONL ledger; bounded per-goal index and version 5 checkpoint |
 | `goal-ledger-events.ts` | The `GoalLedgerEvent` union (29 event types) |
 | `goal-ledger-validate.ts` | Per-event field checks |
-| `goal-ledger-reconstruct.ts` | Folds events into per-goal state, incrementally so a checkpoint can resume mid-stream |
+| `goal-ledger-reconstruct.ts` | Folds caller-supplied event windows into per-goal state |
 | `goal-ledger-queries.ts` | Read-only lookups: latest audit, recent events for a goal |
-| `goal-ledger-checkpoint.ts` | Derived checkpoint file (version 4), its types and codec |
-| `goal-ledger-checkpoint-store.ts` | In-process checkpoint mirror, write throttle, file read and write |
+| `goal-ledger-checkpoint.ts` | Legacy version 4 checkpoint types and codec |
 | `goal-ledger-index.ts` | Bounded per-goal working set (recent events, audit, Oracle state) |
 | `goal-activity.ts` | Ledger to readable activity items |
-| `goal-detail.ts` | Lossless paged objective, task and history text |
+| `goal-detail.ts` | Paged objective, task and bounded history text |
 | `goal-recovery.ts` | `/goal-recovery` report and guarded repair |
 | `goal-session-health.ts` | Read-only checkpoint health report for session files |
 | `storage/goal-files.ts` | Goal file read, write and archive, and the active pool scan |
@@ -286,6 +285,12 @@ publishes without clobbering and claims the validated active inode. These checks
 assume a stable, private project directory and cooperating Goal X instances;
 Node does not expose directory-descriptor operations needed to defend against a
 hostile same-user process swapping paths during an operation.
+
+Ledger reads stream fixed-size chunks, retain bounded event windows and exact
+per-goal facts, and maintain at most sixteen cached indexes and one
+single-goal checkpoint. Older history outside the retained window is reported
+as truncated. Checkpoint reuse validates ledger identity and fixed-size anchors;
+the append-only contract excludes rewrites elsewhere in the covered prefix.
 ## Tests
 
 ```bash
