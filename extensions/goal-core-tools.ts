@@ -12,7 +12,7 @@ import { detailedSummary, goalDetails, renderGoalResult } from "./goal-format.ts
 import { modelBudgetLine } from "./goal-accounting.ts";
 import { buildGoalCreatedReport, buildTaskSummary, findTaskInTree, validateGoalAgentPause, validateGoalBlock } from "./goal-policy.ts";
 import { buildUnfocusedOpenGoalsSummary, otherOpenGoalCount } from "./goal-pool.ts";
-import { readGoalLedger, goalOracleState } from "./goal-ledger.ts";
+import { MAX_GOAL_INDEX_EVENTS, readGoalLedgerForGoal, goalOracleState } from "./goal-ledger.ts";
 import { loadGoalSettings } from "./goal-settings.ts";
 import { buildGoalHistoryBlock, buildGoalTaskDetailBlock } from "./goal-format.ts";
 import { sisyphusStepProgress } from "./goal-policy.ts";
@@ -84,9 +84,11 @@ pi.registerTool(defineTool({
 		}
   if (params.section && params.section !== "summary") {
    if (!["objective", "tasks", "history"].includes(params.section)) return {content: [{type: "text", text: "Unknown goal section."}], details: goalDetails(view)};
-   const history = params.section === "history" ? readGoalLedger(ctx) : undefined;
+   // History pages cover the goal's retained window (at most 4096 events and 8 MiB), never the whole ledger.
+   const history = params.section === "history" ? readGoalLedgerForGoal(ctx, view.id, {maxEvents: MAX_GOAL_INDEX_EVENTS}) : undefined;
    const page = goalDetailPage(view, {section: params.section, task_id: taskId, cursor: params.cursor}, history?.events, history?.revision);
-   return {content: [{type: "text", text: page.text}], details: {...goalDetails(view), ...(page.ok ? {page: {content: page.content, nextCursor: page.nextCursor, totalChars: page.totalChars}} : {})}};
+   const text = history?.truncated ? `${page.text}\nOlder events for this goal lie outside the retained history window.` : page.text;
+   return {content: [{type: "text", text}], details: {...goalDetails(view), ...(page.ok ? {page: {content: page.content, nextCursor: page.nextCursor, totalChars: page.totalChars}} : {})}};
   }
   if (params.cursor || taskId) return {content: [{type: "text", text: "Use section=objective, tasks, or history for detail retrieval; task_id requires tasks."}], details: goalDetails(view)};
 		if (verbose && !params.section) {
@@ -123,7 +125,7 @@ pi.registerTool(defineTool({
 			lines.push("Lifecycle: call update_goal({status: \"complete\"}) only when every requirement is satisfied — the independent auditor verifies from actual evidence. Call update_goal({status: \"blocked\"}) only after the same blocker recurs on three consecutive goal turns. User commands handle pause/resume/clear/focus.");
 			// E1: goal history (last audit verdict + recent lifecycle events).
 			if (includeHistory) {
-				const history = buildGoalHistoryBlock(view, readGoalLedger(ctx).events);
+				const history = buildGoalHistoryBlock(view, readGoalLedgerForGoal(ctx, view.id).events);
 				if (history) lines.push("", history);
 			}
 			return {
@@ -154,7 +156,7 @@ pi.registerTool(defineTool({
 			lines.push(`Blocker: ${view.pauseReason}`);
 		}
   if (params.include_history) {
-   const history = buildGoalHistoryBlock(view, readGoalLedger(ctx).events);
+   const history = buildGoalHistoryBlock(view, readGoalLedgerForGoal(ctx, view.id).events);
    if (history) lines.push(history);
   }
 		return {

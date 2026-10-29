@@ -31,13 +31,13 @@ handlers from their dedicated modules:
 | `goal-contract.ts` | Record/input parser: verification-contract extraction and objective prompt-safety |
 | `goal-policy.ts` | Lifecycle policy and validation (completion/blocked/resume/task gates), task-tree helpers, compaction policy, result reports |
 | `goal-auditor.ts` | Independent pi auditor agent prompt/config/decision parsing and completion audit execution |
-| `goal-ledger.ts` | Single-file goal ledger append/read/reconstruction (18 event types incl. `task_reopened`) |
+| `goal-ledger.ts` | Single-file goal ledger append plus bounded streaming reads, per-goal indexes with a single-goal checkpoint, and reconstruction of caller-bounded windows |
 | `goal-draft.ts` | Drafting prompt/confirmation text helpers (goalDraftingPrompt, buildDraftConfirmationText, renderConfirmationTasks, GoalDraftingFocus) |
 | `goal-drafting.ts` | Guided drafting orchestration: durable `pi-goal-draft` session entries (survive compaction/tree navigation), resume/replace/cancel protection, transient drafting profile, `goal_question`/`goal_questionnaire`/`propose_goal_draft` tools, per-draft auditor selection |
 | `goal-questionnaire.ts` | Structured question/answer UI (`runGoalQuestionnaire`, `showProposalDialog`) used by the drafting tools and confirmations |
 | `goal-tool-names.ts` | The five published tool-name constants, lifecycle-dependent profiles, work/progress classification, post-stop allowlist |
 | `goal-detail.ts` | Lossless objective/task/history paging with content-bound cursors |
-| `goal-ledger-index.ts` | Incremental per-goal activity, audit, lifecycle, and Oracle projections |
+| `goal-ledger-index.ts` | Incremental per-goal activity, audit and lifecycle projections (Oracle state optional) |
 | `goal-task-index.ts` | Content-keyed task snapshots shared by prompts, tools, and dashboard models |
 | `prompts/goal-prompts.ts` | Bounded five-tool steering prompts (active-goal, continuation, stale-checkpoint, unfocused, budget-limited) |
 | `storage/goal-files.ts` | Goal path safety, serialization/parsing, active-file scanning, active-file writes, archive writes, prompt-body merge from disk |
@@ -222,13 +222,23 @@ The SDK active profile changes only when membership changes. Executors still
 validate lifecycle state, including stale calls made after a transition.
 
 Normal prompt/dashboard reads use per-goal ledger indexes: 12 recent events,
-64 activity candidates in stable timestamp order, pinned audit/lifecycle state,
-and blocker-fingerprint Oracle state. Appends extend these indexes without
-copying history. Version 3 derived checkpoints use UTF-8 byte offsets and retain
-reconstructed Oracle advice; old or
-corrupt checkpoints rebuild from the authoritative JSONL ledger. Full history
-is loaded for explicit history/diagnostic requests. Saved goal/session formats
-remain compatible. Task presentation caches use content snapshots; usage changes
+64 activity candidates in stable timestamp order (also capped at one MiB),
+pinned audit/completion/lifecycle state, exact facts such as whether completion
+was ever requested, and a tail of the goal's newest events (at most 4096 events
+and eight MiB). The ledger is never loaded whole: readers stream it in 64 KiB
+chunks and count lines longer than one MiB as malformed. Indexes are cached in
+an LRU of at most sixteen goals and eight MiB, and the newest one is persisted
+as the only checkpoint (version 5, at most ten MiB, digest-protected), so
+neither memory nor the checkpoint grows with the number of goals in the ledger.
+A cached or checkpointed index is reused after the ledger's identity and
+fixed-size head/boundary anchors validate; then only appended bytes are read.
+Replacement, truncation, a changed anchor or a same-size rewrite falls back to
+one streaming rebuild; a rewrite elsewhere in the covered prefix combined with
+a later append cannot be told from a pure append and is outside the append-only
+contract. Oracle consult state is reduced while streaming the ledger on demand
+(a goal being reported blocked), so no per-fingerprint state is retained.
+History pages, `/goal-status` and the whole-ledger reader return bounded
+windows with exact counts. Saved goal/session formats remain compatible. Task presentation caches use content snapshots; usage changes
 do not rebuild task trees. Stable prompt rules precede changing goal data and
 usage counters, with retrieval instructions beside bounded excerpts.
 
@@ -316,8 +326,9 @@ focused active file and reconciles lifecycle state from disk; prompt-body
 edits are picked up from `# Goal Prompt`. Path safety checks reject absolute
 paths, traversal, NUL bytes, symlinks, and paths outside the goal directories.
 
-Goal files, the pool snapshot and archives are read and written through
-`storage/safe-fs.ts`, anchored at `ctx.cwd`: every
+Goal files, the pool snapshot, archives, ledger reads and the ledger
+checkpoint are read and written through `storage/safe-fs.ts`, anchored at
+`ctx.cwd`: every
 directory between the project and a file must be a real directory, final files
 are opened with `O_NOFOLLOW` and must be regular files, reads are bounded and
 taken from one descriptor whose identity is checked against the path, and
@@ -339,7 +350,8 @@ directory-descriptor layer and is not claimed.
 Old readers remain for backward-compatible reads of existing data:
 `readActiveGoalPool`, `readGoalLedger`, `mergeGoalPromptFromDisk`,
 `latestAuditorResultForGoal`, and `normalizeGoalRecord` are all retained and in
-use. The ledger is append-only JSONL and is never rewritten in place.
+use; `readGoalLedger` now returns the newest window of the ledger with exact
+counts. The ledger is append-only JSONL and is never rewritten in place.
 
 ## Tests
 

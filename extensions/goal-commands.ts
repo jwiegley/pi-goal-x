@@ -25,7 +25,7 @@ import {
 	otherOpenGoalCount,
 } from "./goal-pool.ts";
 import { clearGoalCommandMessage, validateResumeGoal } from "./goal-policy.ts";
-import { invalidateGoalLedgerCache, readGoalLedger } from "./goal-ledger.ts";
+import { goalLedgerPath, invalidateGoalLedgerCache, readGoalLedger, readGoalLedgerForGoal } from "./goal-ledger.ts";
 import { buildGoalStatusText } from "./goal-status.ts";
 import { effectiveSettingsReport, invalidateGoalSettingsCache, loadGoalSettingsFileConfig } from "./goal-settings.ts";
 import { invalidateGoalPoolCache, mergeGoalPromptFromDisk, readActiveGoalPool } from "./storage/goal-files.ts";
@@ -232,12 +232,17 @@ export function registerGoalCommands(core: GoalCore): void {
 		);
 	}
 
+	let ledgerRefreshBaseline: { path: string; validEvents: number; malformed: number } | null = null;
+
 	async function runGoalRefresh(ctx: ExtensionContext): Promise<void> {
-		// Pre-state snapshots are cache-served (0 fs ops); the re-reads after
-		// invalidation go cold. This is the explicit user-owned path for picking
-		// up external edits — no watchers, no per-turn polling.
+		// Pre-state pool and settings snapshots are cache-served (0 fs ops); the
+		// re-reads after invalidation go cold. This is the explicit user-owned
+		// path for picking up external edits — no watchers, no per-turn polling.
+		// Ledger reads keep no cache, so ledger changes are reported against the
+		// counts this command saw last (or now, on the first refresh).
 		const beforePool = readActiveGoalPool(ctx);
-		const beforeLedger = readGoalLedger(ctx);
+		const ledgerPath = goalLedgerPath(ctx);
+		const beforeLedger = ledgerRefreshBaseline?.path === ledgerPath ? ledgerRefreshBaseline : readGoalLedger(ctx, { maxEvents: 1 });
 		// Settings: the before fingerprint is cache-served; the after one is a
 		// cold re-read after invalidation — so an external settings edit shows
 		// up as a fingerprint difference.
@@ -248,17 +253,19 @@ export function registerGoalCommands(core: GoalCore): void {
 		invalidateGoalSettingsCache();
 
 		const afterPool = readActiveGoalPool(ctx);
-		const afterLedger = readGoalLedger(ctx);
+		const afterLedger = readGoalLedger(ctx, { maxEvents: 1 });
+		ledgerRefreshBaseline = { path: ledgerPath, validEvents: afterLedger.validEvents, malformed: afterLedger.malformed };
 		const afterSettings = settingsFingerprint(ctx);
 
+		// Bounded reads return a window; compare the exact counts.
 		const changes = diffGoalRefreshState({
 			poolIds: beforePool.keys(),
-			ledgerEvents: beforeLedger.events.length,
+			ledgerEvents: beforeLedger.validEvents,
 			ledgerMalformed: beforeLedger.malformed,
 			settings: beforeSettings,
 		}, {
 			poolIds: afterPool.keys(),
-			ledgerEvents: afterLedger.events.length,
+			ledgerEvents: afterLedger.validEvents,
 			ledgerMalformed: afterLedger.malformed,
 			settings: afterSettings,
 		});
@@ -283,7 +290,7 @@ export function registerGoalCommands(core: GoalCore): void {
 		const otherCount = otherOpenGoalCount(core.goalsById, core.focusedGoalId);
 		const verbose = /^\s*verbose\b/i.test(rawArgs);
 		const health = /^\s*health\b/i.test(rawArgs);
-		const ledger = readGoalLedger(ctx);
+		const ledger = view ? readGoalLedgerForGoal(ctx, view.id) : readGoalLedger(ctx, { maxEvents: 1 });
 		const text = buildGoalStatusText({
 			commands: core.loadedCommands,
 			keybindings: loadGoalSettings(ctx.cwd).keybindings,

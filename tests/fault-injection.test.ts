@@ -22,7 +22,7 @@ import {
 	writeActiveGoalFile,
 } from "../extensions/storage/goal-files.ts";
 import { acquireGoalLock } from "../extensions/storage/goal-lock.ts";
-import { appendGoalEvent, goalLedgerPath, invalidateGoalLedgerCache, loadLedgerState, readGoalLedger } from "../extensions/goal-ledger.ts";
+import { appendGoalEvent, goalLedgerPath, invalidateGoalLedgerCache, readGoalLedger, readGoalLedgerForGoal } from "../extensions/goal-ledger.ts";
 import { diffGoalRefreshState } from "../extensions/goal-commands.ts";
 
 const EXT_ROOT = fileURLToPath(new URL("../extensions/", import.meta.url));
@@ -81,8 +81,8 @@ test("fault: torn ledger tail is counted malformed and never breaks reads or tai
 	try {
 		appendGoalEvent({ cwd }, { type: "goal_created", goalId: "g1", objective: "o", sisyphus: false, autoContinue: true, at: new Date().toISOString() });
 		invalidateAll();
-		// Build a checkpoint over the first event.
-		loadLedgerState({ cwd });
+		// Build the goal's index (and its checkpoint) over the first event.
+		readGoalLedgerForGoal({ cwd }, "g1");
 
 		// Crash-simulated torn append: a partial JSON line at the tail.
 		fs.appendFileSync(goalLedgerPath({ cwd }), '{"type": "goal_focused", "goalId": "g1", "reason": "crea', "utf8");
@@ -94,10 +94,10 @@ test("fault: torn ledger tail is counted malformed and never breaks reads or tai
 
 		// Checkpoint tail replay tolerates the torn tail too.
 		invalidateAll();
-		const state = loadLedgerState({ cwd });
-		assert.equal(state.malformed, 1);
-		assert.equal(state.state.goals.size, 1);
-		assert.equal(state.state.focusedGoalId, null, "no focus event survived; the torn tail did not corrupt state");
+		const goal = readGoalLedgerForGoal({ cwd }, "g1");
+		assert.equal(goal.malformed, 1);
+		assert.deepEqual(goal.events.map((event) => event.type), ["goal_created"], "the torn tail did not corrupt the goal's history");
+		assert.equal(goal.validEvents, 1);
 	} finally {
 		cleanup(cwd);
 	}
@@ -211,22 +211,23 @@ test("fault: child-process append is picked up by the refresh diff (cross-proces
 		`], { cwd, env: { ...process.env, FAULT_CWD: cwd }, encoding: "utf8", timeout: 30_000 });
 		assert.equal(res.status, 0, `child exit ${res.status}`);
 
-		// Parent's warm caches still show the old state (mid-session staleness).
-		const ledgerBefore = readGoalLedger({ cwd }).events.length;
+		// The parent's warm pool cache still shows the old state (mid-session
+		// staleness). Ledger reads keep no cache: the append is visible at once.
+		const ledgerBefore = readGoalLedger({ cwd }).validEvents;
 		const poolBefore = readActiveGoalPool({ cwd }).size;
 		assert.equal(poolBefore, 1, "warm cache before the external write");
-		assert.equal(ledgerBefore, 0, "warm ledger before the external write");
+		assert.equal(ledgerBefore, 1, "the ledger read is disk-authoritative");
 
-		// The refresh diff (before=warm caches, after=cold re-read) reports both.
+		// The refresh diff (before=warm caches, after=cold re-read) reports the pool change.
 		invalidateAll();
 		const afterPool = readActiveGoalPool({ cwd });
 		const afterLedger = readGoalLedger({ cwd });
 		const changes = diffGoalRefreshState(
 			{ poolIds: ["base"], ledgerEvents: ledgerBefore, ledgerMalformed: 0, settings: "s" },
-			{ poolIds: [...afterPool.keys()], ledgerEvents: afterLedger.events.length, ledgerMalformed: afterLedger.malformed, settings: "s" },
+			{ poolIds: [...afterPool.keys()], ledgerEvents: afterLedger.validEvents, ledgerMalformed: afterLedger.malformed, settings: "s" },
 		);
 		assert.ok(changes.some((c) => c.includes("added")), "pool addition reported");
-		assert.ok(changes.some((c) => c.includes("ledger: 0 -> 1 events")), "ledger growth reported");
+		assert.equal(changes.some((c) => c.startsWith("ledger")), false, "no stale ledger state was left to report");
 	} finally {
 		cleanup(cwd);
 	}

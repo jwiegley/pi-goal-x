@@ -562,24 +562,29 @@ export class GoalWidgetComponent implements Component {
 			return clampLinesToWidth(renderAuditResultCardView(auditResult, this.theme, width), width);
 		}
 		const goal = this.getGoal();
-		const otherCount = Math.max(0, this.getOpenGoalCount() - 1);
-		const model = goal ? deriveGoalDashboardModel(goal as GoalRecord | null, {
+		const openGoalCount = this.getOpenGoalCount();
+		const otherCount = Math.max(0, openGoalCount - 1);
+		const auditorProgress = this.getAuditorProgress();
+		// Read the goal's ledger window once per render, and not at all while
+		// the auditor view replaces the dashboard.
+		const ledgerEvents = goal && !auditorProgress ? this.getLedgerEvents() : [];
+		const model = goal && !auditorProgress ? deriveGoalDashboardModel(goal as GoalRecord | null, {
 			focused: true,
 			otherOpenGoals: otherCount,
-			ledgerEvents: this.getLedgerEvents(),
+			ledgerEvents,
 			tasksDisabled: settings.disableTasks === true,
 			maxAutonomousRuns: settings.maxAutonomousRuns,
 			idleContinuationBackoff: settings.idleContinuationBackoff,
 			commands: settings.commands,
 		}) : null;
-		this.maybeReanchor(model);
-		const lines = renderGoalWidgetLines(this.getGoal(), this.theme, safeWidth, {
-			openGoalCount: this.getOpenGoalCount(),
-			auditorProgress: this.getAuditorProgress(),
+		if (!auditorProgress) this.maybeReanchor(model);
+		const lines = renderGoalWidgetLines(goal, this.theme, safeWidth, {
+			openGoalCount,
+			auditorProgress,
 			disableTasks: settings.disableTasks,
 			stalled: this.getStalled(),
 			expanded: this.getExpanded(),
-			ledgerEvents: this.getLedgerEvents(),
+			ledgerEvents,
 			debug: this.getDebugMode(),
 			model,
 			compactScrollOffset: this.compactScrollOffset,

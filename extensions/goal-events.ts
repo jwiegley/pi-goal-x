@@ -15,7 +15,7 @@ import {
 	isMeaningfulProgressToolCall,
 } from "./goal-format.ts";
 import { buildCompactionSummary, buildPostCompactionGoalDelta } from "./goal-compaction.ts";
-import { latestAuditorResultForGoal, readGoalLedger, goalRuntimeEvents, invalidateGoalLedgerCache } from "./goal-ledger.ts";
+import { latestAuditorResultForGoal, goalRuntimeEvents, invalidateGoalLedgerCache, type GoalLedgerEvent } from "./goal-ledger.ts";
 import { shouldArmPostCompactReminder, shouldInjectPostCompactReminder } from "./goal-policy.ts";
 import { formatTokenValue } from "./goal-core.ts";
 import { loadGoalSettings, invalidateGoalSettingsCache } from "./goal-settings.ts";
@@ -461,8 +461,8 @@ export function registerGoalEvents(core: GoalCore): void {
 		// Several prompt enrichments may need the same ledger snapshot. Keep one
 		// local read for this hook instead of repeatedly traversing the cached
 		// ledger when rejection and post-compaction steering overlap.
-		let promptLedger: ReturnType<typeof readGoalLedger> | undefined;
-		const getPromptLedger = () => promptLedger ??= { events: core.state.goal ? goalRuntimeEvents(ctx, core.state.goal.id) : [], malformed: 0 };
+		let promptLedger: { events: GoalLedgerEvent[] } | undefined;
+		const getPromptLedger = () => promptLedger ??= { events: core.state.goal ? goalRuntimeEvents(ctx, core.state.goal.id) : [] };
 
 		if (!core.state.goal) {
 			// Issue #72: hideUnfocusedPrompt opts out of the model-facing

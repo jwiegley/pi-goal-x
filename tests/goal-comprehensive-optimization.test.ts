@@ -8,7 +8,7 @@ import { createGoal, type GoalTask } from "../extensions/goal-record.ts";
 import { taskIndex } from "../extensions/goal-task-index.ts";
 import { goalPrompt } from "../extensions/prompts/goal-prompts.ts";
 import { goalDetailPage } from "../extensions/goal-detail.ts";
-import { readGoalLedger, appendGoalEvents, invalidateGoalLedgerCache, loadLedgerState, LEDGER_CHECKPOINT_FILE, type GoalLedgerEvent } from "../extensions/goal-ledger.ts";
+import { readGoalLedger, readGoalLedgerForGoal, goalOracleState, appendGoalEvents, invalidateGoalLedgerCache, LEDGER_CHECKPOINT_FILE, type GoalLedgerEvent } from "../extensions/goal-ledger.ts";
 import { buildPostCompactionGoalDelta } from "../extensions/goal-compaction.ts";
 import { recentNonEmptyLines } from "../extensions/goal-auditor.ts";
 import { readActiveGoalPool, readActiveGoalPoolAsync, invalidateGoalPoolCache, writeActiveGoalFile, archiveGoalFile } from "../extensions/storage/goal-files.ts";
@@ -149,16 +149,19 @@ test("task updates copy only changed ancestors and leave unrelated branches and 
 
 test("Oracle state survives checkpoint reload and corrupt derived state rebuilds from the ledger", () => {
  const f=fixture(); try {
-  appendGoalEvents(f,[{type:"goal_created",goalId:f.goal.id,objective:f.goal.objective,sisyphus:false,autoContinue:true,at:"2026-09-07"}, {type:"oracle_result",goalId:f.goal.id,fingerprint:"fp",adviceId:"advice",disposition:"actionable",summary:"Try the verified alternative 🧭",at:"2026-09-07"}]);
-  invalidateGoalLedgerCache(); const full=loadLedgerState(f);
-  invalidateGoalLedgerCache(); const cached=loadLedgerState(f);
-  assert.equal(cached.source,"checkpoint");
-  assert.deepEqual(cached.state.goals.get(f.goal.id)!.latestOracleResult,full.state.goals.get(f.goal.id)!.latestOracleResult);
+  appendGoalEvents(f,[{type:"goal_created",goalId:f.goal.id,objective:f.goal.objective,sisyphus:false,autoContinue:true,at:"2026-09-07"}, {type:"oracle_result",goalId:f.goal.id,fingerprint:"fp",adviceId:"advice",disposition:"actionable",summary:"Try the verified alternative 🧭",at:"2026-09-07"}, {type:"audit_result",goalId:f.goal.id,verdict:"disapproved",report:"Recheck 🧭",at:"2026-09-07"}]);
+  const oracle={result:{adviceId:"advice",disposition:"actionable",summary:"Try the verified alternative 🧭"},failedAttempts:0,followupAttempted:false};
+  invalidateGoalLedgerCache(); const full=readGoalLedgerForGoal(f,f.goal.id);
+  invalidateGoalLedgerCache(); const cached=readGoalLedgerForGoal(f,f.goal.id);
+  assert.deepEqual(cached,{...full,revision:cached.revision});
+  // Oracle state is reduced from the authoritative ledger, never from derived state.
+  assert.deepEqual(goalOracleState(f,f.goal.id,"fp"),oracle);
   const file=path.join(f.cwd,".pi/goals",LEDGER_CHECKPOINT_FILE);
   const valid=JSON.parse(fs.readFileSync(file,"utf8"));
-  for (const damage of [(copy: typeof valid) => {copy.acc.goals[0].latestOracleResult.disposition="invalid";}, (copy: typeof valid) => {copy.runtimeIndex[0][1].oracle[0][1].result.summary=null;}, (copy: typeof valid) => {delete copy.acc.goals;}]) {
+  for (const damage of [(copy: typeof valid) => {copy.projection.audit.verdict="invalid";}, (copy: typeof valid) => {copy.events[1].summary=null;}, (copy: typeof valid) => {delete copy.identity;}]) {
    const copy=structuredClone(valid); damage(copy); fs.writeFileSync(file,JSON.stringify(copy)); invalidateGoalLedgerCache();
-   const rebuilt=loadLedgerState(f); assert.equal(rebuilt.source,"full"); assert.deepEqual(rebuilt.state.goals.get(f.goal.id)!.latestOracleResult,full.state.goals.get(f.goal.id)!.latestOracleResult);
+   const rebuilt=readGoalLedgerForGoal(f,f.goal.id); assert.deepEqual(rebuilt.events,full.events); assert.deepEqual(rebuilt.latestAuditorResult,full.latestAuditorResult);
+   assert.deepEqual(goalOracleState(f,f.goal.id,"fp"),oracle);
   }
  } finally {f.cleanup();invalidateGoalLedgerCache();}
 });

@@ -8,7 +8,7 @@ import { goalPrompt, taskListBlock, MAX_PROMPT_FRAGMENT_CHARS } from "../extensi
 import { taskIndex } from "../extensions/goal-task-index.ts";
 import { deriveGoalDashboardModel } from "../extensions/widgets/goal-dashboard-model.ts";
 import { deriveGoalActivity } from "../extensions/goal-activity.ts";
-import { appendGoalEvents, appendGoalEvent, readGoalLedger, goalActivityEvents, goalOracleState, invalidateGoalLedgerCache, loadLedgerState, LEDGER_CHECKPOINT_FILE, type GoalLedgerEvent } from "../extensions/goal-ledger.ts";
+import { appendGoalEvents, appendGoalEvent, readGoalLedger, goalActivityEvents, goalOracleState, invalidateGoalLedgerCache, readGoalLedgerForGoal, LEDGER_CHECKPOINT_FILE, type GoalLedgerEvent } from "../extensions/goal-ledger.ts";
 import { writeActiveGoalFile, parseGoalFile, serializeGoalFile } from "../extensions/storage/goal-files.ts";
 // @ts-expect-error Shared JavaScript benchmark harness has no declaration file.
 import { createHarness, startHarness, focusedFixture } from "../experiments/bench/bench-common.mjs";
@@ -131,14 +131,16 @@ test("long ledger projections stay bounded, preserve older Oracle state, and rec
 
 test("Unicode ledger offsets and first warm append are counted exactly once", () => {
  const f=focusedFixture(); try {
-  readGoalLedger(f);
+  readGoalLedgerForGoal(f,f.goal.id);
   appendGoalEvent(f,{type:"goal_created",goalId:f.goal.id,objective:"日本語 🧪",sisyphus:false,autoContinue:true,at:"2026-09-01"});
+  assert.equal(readGoalLedgerForGoal(f,f.goal.id).events.length,1);
   const cp=JSON.parse(readFileSync(path.join(f.cwd,".pi/goals",LEDGER_CHECKPOINT_FILE),"utf8"));
-  assert.equal(cp.coveredEvents,1);
-  assert.equal(cp.coveredBytes,readFileSync(path.join(f.cwd,".pi/goals/goal_events.jsonl")).length);
+  assert.equal(cp.validEvents,1);
+  assert.equal(cp.identity.size,readFileSync(path.join(f.cwd,".pi/goals/goal_events.jsonl")).length);
   appendGoalEvent(f,{type:"goal_paused",goalId:f.goal.id,reason:"é",at:"2026-09-02"});
-  invalidateGoalLedgerCache(); const state=loadLedgerState(f);
-  assert.equal(state.coveredEvents,2); assert.equal(state.state.goals.get(f.goal.id)?.latestPauseReason,"é");
+  invalidateGoalLedgerCache(); const goal=readGoalLedgerForGoal(f,f.goal.id);
+  assert.equal(goal.validEvents,2); assert.deepEqual(goal.events.map(e=>e.type),["goal_created","goal_paused"]);
+  assert.equal((goal.events[1] as {reason:string}).reason,"é");
  } finally {f.cleanup();}
 });
 

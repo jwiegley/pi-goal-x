@@ -35,7 +35,7 @@ import {
 	makeLedger,
 	cleanupFixture,
 } from "./bench-common.mjs";
-import { loadLedgerState } from "../../extensions/goal-ledger.ts";
+import { readGoalLedgerForGoal } from "../../extensions/goal-ledger.ts";
 import { spawnContention } from "./node-child-process.mjs";
 import { allowChildProcess } from "./guard-state.mjs";
 
@@ -104,7 +104,7 @@ export async function run(baseline) {
 		mkdirSync(path.join(cwdCp, ".pi"), { recursive: true });
 		writeFileSync(path.join(cwdCp, ".pi", "pi-goal-x-settings.json"), JSON.stringify({ subtaskDepth: 2, provider: "anthropic", model: "m", thinking_level: "medium" }));
 		makeLedger(cwdCp, 1000);
-		loadLedgerState({ cwd: cwdCp }); // full fallback in the parent writes the checkpoint
+		readGoalLedgerForGoal({ cwd: cwdCp }, "g2"); // full scan in the parent writes the checkpoint
 		// Tail fixture: checkpoint covers the ledger, then 50 external events grow it.
 		const tailLedger = path.join(cwdCp, ".pi", "goals", "goal_events.jsonl");
 		for (let i = 0; i < 50; i++) {

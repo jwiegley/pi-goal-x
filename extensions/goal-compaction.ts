@@ -9,7 +9,6 @@ import {
   latestEventsForGoal,
   reconstructGoalLedger,
   type GoalLedgerEvent,
-  type LedgerStateReadResult,
 } from "./goal-ledger.ts";
 import { type GoalRecord } from "./goal-record.ts";
 import { taskIndex } from "./goal-task-index.ts";
@@ -92,32 +91,30 @@ export function buildGoalCompactSummary(
   return lines.join("\n");
 }
 
+/**
+ * Deterministic compaction summary over a caller-supplied event window. The
+ * caller bounds `ledgerEvents` (see readGoalLedger); the terminal-goal list is
+ * capped as well, so the summary never grows with the ledger's history.
+ */
 export function buildCompactionSummary(args: {
   goalsById: Map<string, GoalRecord>;
   focusedGoalId: string | null;
   ledgerEvents?: GoalLedgerEvent[];
-  /** Checkpoint-fed view: uses reconstructed state + per-goal recent tails instead of a full event list. */
-  ledgerState?: LedgerStateReadResult;
   capOpenGoals?: number;
   capEventsPerGoal?: number;
+  capTerminalGoals?: number;
 }): string {
-  const { goalsById, focusedGoalId, ledgerEvents = [], ledgerState, capOpenGoals = 20, capEventsPerGoal = 5 } = args;
+  const { goalsById, focusedGoalId, ledgerEvents = [], capOpenGoals = 20, capEventsPerGoal = 5, capTerminalGoals = 20 } = args;
 
   const lines: string[] = [];
   const openGoals = Array.from(goalsById.values()).filter((g) => g.status !== "complete");
-  const reconstructed = ledgerState?.state ?? reconstructGoalLedger(ledgerEvents);
-  const recentEventsFor = (goalId: string, cap: number): GoalLedgerEvent[] => {
-    if (ledgerState) return (ledgerState.recentEventsByGoal.get(goalId) ?? []).slice(0, cap);
-    return latestEventsForGoal(ledgerEvents, goalId, cap);
-  };
+  const reconstructed = reconstructGoalLedger(ledgerEvents);
+  const recentEventsFor = (goalId: string, cap: number): GoalLedgerEvent[] => latestEventsForGoal(ledgerEvents, goalId, cap);
 
   if (focusedGoalId && goalsById.has(focusedGoalId)) {
     const focused = goalsById.get(focusedGoalId)!;
-    const auditor = ledgerState
-      ? reconstructed.goals.get(focusedGoalId)?.latestAuditorResult ?? reconstructed.terminalGoals.get(focusedGoalId)?.latestAuditorResult
-      : undefined;
     lines.push(`[FOCUSED GOAL]`);
-    lines.push(buildGoalCompactSummary(focused, recentEventsFor(focusedGoalId, capEventsPerGoal), auditor));
+    lines.push(buildGoalCompactSummary(focused, recentEventsFor(focusedGoalId, capEventsPerGoal)));
     lines.push("");
   }
 
@@ -135,9 +132,13 @@ export function buildCompactionSummary(args: {
 
   if (reconstructed.terminalGoals.size > 0) {
     lines.push(`[TERMINAL GOALS — ${reconstructed.terminalGoals.size} completed or aborted]`);
-    for (const [goalId, state] of reconstructed.terminalGoals) {
+    const terminalGoals = Array.from(reconstructed.terminalGoals.entries()).slice(-capTerminalGoals);
+    for (const [goalId, state] of terminalGoals) {
       const label = state.latestStatus === "complete" ? "completed" : "aborted";
       lines.push(`- ${goalId} — ${label}${state.completedAt ? ` at ${state.completedAt}` : ""}${state.abortedAt ? ` at ${state.abortedAt}` : ""}`);
+    }
+    if (reconstructed.terminalGoals.size > terminalGoals.length) {
+      lines.push(`... and ${reconstructed.terminalGoals.size - terminalGoals.length} earlier`);
     }
     lines.push("");
   }

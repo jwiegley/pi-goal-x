@@ -162,7 +162,8 @@ function scanOrphanedSnapshotGoals(ctx: GoalFileContext): OrphanedSnapshotEntry[
 
 /** Read-only recovery report. Never mutates goal storage. */
 export function runRecoveryReport(ctx: GoalFileContext): RecoveryReport {
-	const ledger = readGoalLedger(ctx);
+	// Only the malformed-line count is needed; the window stays minimal.
+	const ledger = readGoalLedger(ctx, { maxEvents: 1 });
 	const malformedGoalFiles = scanMalformedGoalFiles(ctx);
 	const staleLocks = scanStaleLocks(ctx);
 	const orphanedSnapshotGoals = scanOrphanedSnapshotGoals(ctx);
