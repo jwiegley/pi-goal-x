@@ -13,6 +13,7 @@ import type {
 	HostSlice,
 } from "./goal-core-types.ts";
 import { t } from "./i18n/index.ts";
+import { latestActiveCustomEntries } from "./goal-session-entries.ts";
 
 type GoalDraftMode = GoalDraftingFocus | "tweak";
 
@@ -107,14 +108,8 @@ export function rehydrateDraft(core: DraftRecorder & GoalDiskSync & GoalFocusedG
 	activeDrafts.delete(core);
 	let session: GoalDraftSession | null = null;
 	try {
-		const entries = ctx.sessionManager.getBranch();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i] as { type?: string; customType?: string; data?: unknown };
-			if (entry.type === "custom" && entry.customType === DRAFT_ENTRY) {
-				session = entry.data as GoalDraftSession;
-				break;
-			}
-		}
+		const entry = latestActiveCustomEntries(ctx.sessionManager, [DRAFT_ENTRY]).get(DRAFT_ENTRY);
+		if (entry) session = entry.data as GoalDraftSession;
 	} catch {
 		session = null;
 	}

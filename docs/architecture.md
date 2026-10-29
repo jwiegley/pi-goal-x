@@ -232,6 +232,10 @@ and `session_tree` focus is resolved in this order:
 4. No entry and `autoSelectSingleGoal` on: focus the only open goal.
 5. Otherwise stay unfocused until the user chooses.
 
+Hosts with indexed session history read the latest focus, legacy state, and draft
+entries through `getLatestCustomEntry(type, { scope: "active" })` without walking
+the branch. Other hosts fall back to a reverse branch scan.
+
 No agent tool can change focus.
 
 ## Tools
@@ -257,7 +261,6 @@ stop tool in the same turn, and blocks work tools from a stale checkpoint.
 - A `token_budget` moves the goal to `budget_limited` once, appends
   `goal_budget_limited`, arms wrap-up steering and cancels continuations. It
   never means complete.
-
 ## Completion
 
 `update_goal({status: "complete"})` is valid for active and paused goals. The

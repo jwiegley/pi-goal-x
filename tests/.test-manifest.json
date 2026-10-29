@@ -61,6 +61,7 @@
     "./tests/goal-scheduler.test.ts",
     "./tests/goal-service-parts.test.ts",
     "./tests/goal-service.test.ts",
+    "./tests/goal-session-entries.test.ts",
     "./tests/goal-session-health.test.ts",
     "./tests/goal-session-safety.test.ts",
     "./tests/goal-settings-race.test.ts",
