@@ -180,6 +180,34 @@ describe("GoalService mutation pipeline", () => {
 			});
 			assert.ok(result.ok, "apply must still succeed when the ledger factory throws");
 			assert.ok(f.ref.getFocused()?.objective.includes("Ledger-broken"), "memory must be committed");
+			assert.deepEqual(
+				f.log.diagnostics.map((d) => [d.source, d.message]),
+				[["ledger", "Ledger spec error during goal mutation: Error: ledger boom"]],
+				"the lost ledger events must be reported",
+			);
+		} finally {
+			f.cleanup();
+		}
+	});
+
+	it("ledger factory failure inside a buffered turn is reported", () => {
+		const f = fixture();
+		try {
+			f.service.beginTurn(f, f.written.id);
+			const result = f.service.apply({ cwd: f.cwd }, {
+				reconcile: false,
+				mutate: (g) => ({ ...g, objective: "=== Goal ===\nObjective: Buffered ledger-broken" }),
+				ledger: () => {
+					throw new Error("buffered ledger boom");
+				},
+			});
+			assert.ok(result.ok, "the buffered mutation still applies");
+			assert.deepEqual(
+				f.log.diagnostics.map((d) => [d.source, d.message]),
+				[["ledger", "Ledger spec error during goal mutation: Error: buffered ledger boom"]],
+			);
+			f.service.flushTurn(f);
+			assert.ok(parseGoalFile(path.join(f.cwd, f.written.activePath!))!.objective.includes("Buffered ledger-broken"));
 		} finally {
 			f.cleanup();
 		}

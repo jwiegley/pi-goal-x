@@ -37,11 +37,12 @@ function staleFocusTokenMessage(token: { goalId: string }): string {
 }
 
 /** Ledger events a mutation spec produces for the written record; a throwing spec yields none. */
-function ledgerEventsFor(spec: GoalMutationSpec, written: GoalRecord): GoalLedgerEvent[] {
+function ledgerEventsFor(spec: GoalMutationSpec, written: GoalRecord, onError: (error: unknown) => void): GoalLedgerEvent[] {
 	if (!spec.ledger) return [];
 	try {
 		return typeof spec.ledger === "function" ? spec.ledger(written) : spec.ledger;
-	} catch {
+	} catch (error) {
+		onError(error);
 		return [];
 	}
 }
@@ -175,6 +176,10 @@ export class GoalService {
 		return appendLedgerEventsBestEffort(ctx, events, diagnostic => this.ref.onDiagnostic(diagnostic));
 	}
 
+	private reportLedgerSpecError(goalId: string, error: unknown): void {
+		this.ref.onDiagnostic({ severity: "warning", source: "ledger", goalId, message: `Ledger spec error during goal mutation: ${String(error)}` });
+	}
+
 	private reportGoalLockReleaseFailure(goalId: string, error: unknown): void {
 		this.ref.onDiagnostic({ severity: "warning", source: "lock", goalId, message: `Goal lock release failed after the operation completed; its result was preserved: ${error instanceof Error ? error.message : String(error)}` });
 	}
@@ -302,7 +307,7 @@ export class GoalService {
 			...spec.mutate(cloneGoal(current)),
 			revision: (current.revision ?? 0) + 1,
 		});
-		this.turn.ledger.push(...ledgerEventsFor(spec, mutated));
+		this.turn.ledger.push(...ledgerEventsFor(spec, mutated, error => this.reportLedgerSpecError(mutated.id, error)));
 		this.turn.goal = mutated;
 		this.turn.archive = spec.archive === true;
 		return this.commitMutation(spec, current.id, mutated);
@@ -335,7 +340,7 @@ export class GoalService {
 			const written = spec.archive ? this.archiveValidated(ctx, mutated, freshSnapshot) : writeActiveGoalFile(ctx, mutated);
 
 			// 5. ledger append best effort.
-			this.appendLedger(ctx, ledgerEventsFor(spec, written));
+			this.appendLedger(ctx, ledgerEventsFor(spec, written, error => this.reportLedgerSpecError(written.id, error)));
 
 			return this.commitMutation(spec, current.id, written);
 		});
