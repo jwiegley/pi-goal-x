@@ -238,13 +238,20 @@ export function registerGoalCommands(core: GoalCommandsCore): void {
 		const report = runRecoveryReport(ctx);
 		if (/^repair$/i.test(rawArgs)) {
 			const result = await runRecoveryRepair(ctx, report, async () => {
-				const confirmed = await ctx.ui.confirm(t("Remove {count} stale lock(s) and refresh the pool snapshot?", { count: report.staleLocks.length }), t("Files are backed up to .pi/goals/.recovery-backup first."));
+				const gates = report.abandonedGates.length > 0 ? ` ${report.abandonedGates.length} abandoned lock gate(s) stay for removal by hand.` : "";
+				const confirmed = await ctx.ui.confirm(t("Archive {completed} stranded completed goal(s), backfill {pending} pending ledger record(s), remove {locks} stale lock(s), and refresh the pool snapshot?{gates}", { completed: report.completedActiveGoals.length, pending: report.pendingRecoveryLedger.length, locks: report.staleLocks.length, gates }), t("Files are backed up to .pi/goals/.recovery-backup first."));
 				return confirmed === true;
 			});
 			if (result.confirmed) {
-				ctx.ui.notify(result.applied.length > 0
-					? t("goal-recovery repair: {count} operation(s) applied.\n{operations}\nBackup: {backupDir}", { count: result.applied.length, operations: result.applied.map((a) => `  - ${a}`).join("\n"), backupDir: String(result.backupDir) })
-					: t("goal-recovery repair: nothing to repair."), "info");
+				const lines = [
+					result.applied.length + result.failures.length > 0
+						? `goal-recovery repair: ${result.applied.length} operation(s) applied, ${result.failures.length} failed.`
+						: "goal-recovery repair: nothing to repair.",
+					...result.applied.map((applied) => `  - applied: ${applied}`),
+					...result.failures.map((failure) => `  - failed: ${failure.operation}/${failure.stage} ${failure.target} — ${failure.message}`),
+					...(result.backupDir ? [`Backup: ${result.backupDir}`] : []),
+				];
+				ctx.ui.notify(lines.join("\n"), result.failures.length > 0 ? "warning" : "info");
 			} else {
 				ctx.ui.notify(t("goal-recovery repair: cancelled — nothing changed."), "info");
 			}
@@ -514,7 +521,7 @@ export function registerGoalCommands(core: GoalCommandsCore): void {
 		},
 	});
 	define("goal-recovery", {
-		description: t("Read-only storage/recovery report (malformed goal files, malformed ledger lines, stale locks, orphaned snapshot data). Append \"repair\" to remove stale locks and refresh the pool snapshot after confirmation (with backup)."),
+		description: t("Read-only storage/recovery report (malformed goal files and ledger lines, stale locks, orphaned snapshot data, completed goals stranded at active paths). Append \"repair\" to archive stranded completions, remove stale locks and refresh the pool snapshot after confirmation (with backup)."),
 		handler: async (rawArgs, ctx) => {
 			await runGoalRecovery((rawArgs ?? "").trim(), ctx);
 		},

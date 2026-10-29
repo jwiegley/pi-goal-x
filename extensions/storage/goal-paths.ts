@@ -54,7 +54,7 @@ export function isSafeActivePath(ctx: GoalFileContext, relPath: string | undefin
 	);
 }
 
-function isSafeArchivedPath(ctx: GoalFileContext, relPath: string | undefined): relPath is string {
+export function isSafeArchivedPath(ctx: GoalFileContext, relPath: string | undefined): relPath is string {
 	return Boolean(
 		isSafeRelativeUnder(ctx, ARCHIVED_GOALS_DIR, relPath)
 			&& ARCHIVED_NAME.test(path.posix.basename(normalizeRelPath(relPath))),

@@ -295,6 +295,8 @@ Appends are serialized by a private SQLite lock and verified against the ledger
 inode. Ambiguous append failures are reported without event-by-event retries.
 Per-goal locks carry ownership tokens; live owners are never displaced by age.
 Release validates ownership, and abandoned ownership gates require offline recovery.
+`/goal-recovery` can archive stranded completed records and backfill missing
+ledger events after confirmation and backup; pending markers support retries.
 ## Tests
 
 ```bash
