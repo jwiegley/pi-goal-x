@@ -4,6 +4,17 @@ All notable changes to pi-goal-x are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Read the latest focus, state and draft entries without walking the session branch, using Pi's latest-entry lookup when the host provides it.
+- Keep goal reads bounded as the ledger grows: stream the ledger in fixed chunks, retain bounded event windows with exact counts, and keep small per-goal indexes and a single-goal checkpoint that rescans only appended bytes.
+- Read and write goal files, snapshots, archives, the ledger and its checkpoint through descriptor-checked regular files below the project, never through symlinks. Archives no longer delete a successor written meanwhile.
+- Refuse a `goalsRoot` / `PI_GOAL_ROOT` outside the project directory with a message naming a valid choice.
+- Serialize ledger appends across processes, start each batch on a fresh line after a torn tail, refuse events the reader could not read back, and never retry an ambiguous batch event by event.
+- Never take over a live goal lock because of its age, and release only the lock the holder created. Task-update retries no longer time out on their own lock, and a release failure after a committed write is reported instead of failing the write.
+- `/goal-recovery repair` archives completed goals stranded at active paths, backfills their ledger events, and reports every failed step.
+- `/goal-clear` refuses a goal edited while its confirmation was open, keeps the goal focused when archival fails, and records the archive in the ledger.
+
 ## [0.34.1] — 2026-10-27
 
 Includes #118.
