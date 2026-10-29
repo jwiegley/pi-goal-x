@@ -87,15 +87,15 @@ For the reported OpenCode model, a narrowly scoped Pi `models.json` override mak
 
 The capability flag permits the adapter to send the explicit non-strict opt-out; it does not request strict sampling for ordinary goal tools. Merge this into existing model configuration and reload Pi. This is a provider-specific workaround, not a guarantee about third-party model behavior. The local reproduction inspects requests before transmission; the issue's live OpenCode A/B result has not been independently reproduced. See [issue #59](https://github.com/tmonk/pi-goal-x/issues/59) and [OpenAI's function-calling documentation](https://developers.openai.com/api/docs/guides/function-calling).
 
-## Sharing a goal pool across worktrees
+## Choosing the goal pool directory
 
-By default goals stay in `<cwd>/.pi/goals`. Set `goalsRoot` in your project or global settings to an absolute directory (or `~/path`), or set `PI_GOAL_ROOT` for the session. Precedence is environment, project, global, then the existing default. For example:
+By default goals stay in `<cwd>/.pi/goals`. Set `goalsRoot` in your project or global settings to an absolute directory (or `~/path`) inside the project, or set `PI_GOAL_ROOT` for the session. Precedence is environment, project, global, then the existing default. For example, in a project at `~/work/project`:
 
 ```json
-{ "goalsRoot": "~/work/project-goals" }
+{ "goalsRoot": "~/work/project/state/goals" }
 ```
 
-Worktrees pointing to the same root share goals, archives, ledger and locks; focus remains session-local and execution ownership still requires explicit resume. The working directory for tools and audits is unchanged. Existing goals are not moved automatically. Reload/reopen the session after changing roots; `/goal-refresh` refreshes the selected pool. `/goal-status verbose` shows the effective location. Saved goal paths remain logical `.pi/goals/...` paths within that selected pool.
+The root must be a subdirectory of the directory Pi runs in. A root outside it, including another worktree or a shared directory elsewhere in your home, is refused with an error naming the project, as is the project directory itself; Goal X only reads and writes goal storage below the project. Every directory between the project and the root must be a real directory, not a symlink. Sessions in the project that select the same root share goals, archives, ledger and locks; focus remains session-local and execution ownership still requires explicit resume. The working directory for tools and audits is unchanged. Existing goals are not moved automatically. Reload/reopen the session after changing roots; `/goal-refresh` refreshes the selected pool. `/goal-status verbose` shows the effective location. Saved goal paths remain logical `.pi/goals/...` paths within that selected pool.
 
 `hideUnfocusedPrompt: true` suppresses ordinary unfocused reminders to the model independently of `hideUnfocusedBanner`; neither changes focus or bypasses stale-checkpoint checks.
 

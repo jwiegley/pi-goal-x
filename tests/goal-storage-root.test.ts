@@ -16,18 +16,20 @@ import { runRecoveryReport } from "../extensions/goal-recovery.ts";
 function fixture(t: test.TestContext) {
 	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "goal-root-")));
 	t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); invalidateGoalSettingsCache(); invalidateGoalPoolCache(); });
-	const root = path.join(dir, "pool");
+	// Every session below runs in one project; configured roots stay inside it.
+	const project = path.join(dir, "project");
+	const root = path.join(project, "pool");
 	const context = (name: string, configured: unknown = root) => {
-		const cwd = path.join(dir, name);
+		const cwd = project;
 		fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
 		fs.writeFileSync(path.join(cwd, ".pi/pi-goal-x-settings.json"), JSON.stringify(configured === undefined ? {} : { goalsRoot: configured }));
 		invalidateGoalSettingsCache();
 		return { cwd, sessionManager: { getSessionId: () => name } };
 	};
-	return { dir, root, context };
+	return { dir, project, root, context };
 }
 
-test("shared pool keeps goals, ledger, locks, archives and snapshots together", t => {
+test("configured pool keeps goals, ledger, locks, archives and snapshots together", t => {
 	const f = fixture(t), a = f.context("a"), b = f.context("b");
 	const goal = writeActiveGoalFile(a, createGoal({ objective: "Shared work", autoContinue: true, sisyphus: false }));
 	assert.equal(readActiveGoalPool(b).get(goal.id)?.objective, "Shared work");
@@ -54,7 +56,7 @@ test("shared pool keeps goals, ledger, locks, archives and snapshots together", 
 test("root is pinned per session and separate sessions can select different pools", t => {
 	const f = fixture(t), a = f.context("a");
 	const plain = goalStorageContext(a);
-	const next = path.join(f.dir, "new-pool");
+	const next = path.join(f.project, "new-pool");
 	f.context("a", next);
 	assert.equal(goalStorageRoot(a), f.root);
 	assert.equal(goalStorageRoot(plain), f.root);
@@ -75,8 +77,29 @@ test("invalid roots and symlinked managed directories fail instead of falling ba
 	const goal = createGoal({ objective: "No escape", autoContinue: true, sisyphus: false });
 	assert.throws(() => archiveGoalFile(a, goal), /symlink/);
 	assert.deepEqual(fs.readdirSync(outside), []);
-	fs.symlinkSync(outside, path.join(f.dir, "linked-root"));
-	assert.throws(() => goalStorageRoot(f.context("linked", path.join(f.dir, "linked-root"))), /symlink/);
+	fs.symlinkSync(outside, path.join(f.project, "linked-root"));
+	assert.throws(() => goalStorageRoot(f.context("linked", path.join(f.project, "linked-root"))), /symlink/);
+	assert.throws(() => goalStorageRoot(f.context("linked-parent", path.join(f.project, "linked-root", "pool"))), /symlink/);
+	assert.deepEqual(fs.readdirSync(outside), [], "a symlinked component is refused before anything is created through it");
+});
+
+test("roots outside the project are refused with a clear message and nothing is created", t => {
+	const f = fixture(t);
+	const sibling = path.join(f.dir, "sibling-pool");
+	for (const [name, configured] of [
+		["sibling", sibling],
+		["traversal", `${f.project}${path.sep}..${path.sep}sibling-pool`],
+		["home", "~"],
+		["project", f.project],
+	] as const) {
+		assert.throws(() => goalStorageRoot(f.context(name, configured)), /must name a directory inside the project/, name);
+	}
+	assert.equal(fs.existsSync(sibling), false);
+	assert.throws(() => goalStorageRoot(f.context("message", sibling)), new RegExp(`${sibling.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is outside it`));
+	assert.throws(() => goalStorageRoot(f.context("self", f.project)), /is the project directory itself/);
+	const nested = path.join(f.project, "state", "goals");
+	assert.equal(goalStorageRoot(f.context("nested", nested)), nested);
+	assert.ok(fs.lstatSync(path.join(nested, ".metadata")).isDirectory());
 });
 
 test("default paths stay compatible; root configuration honors environment precedence", t => {

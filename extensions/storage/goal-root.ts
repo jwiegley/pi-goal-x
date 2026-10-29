@@ -36,17 +36,42 @@ function configuredGoalRoot(ctx: GoalStorageContext): string {
 	if (configured !== undefined) {
 		const expanded = configured === "~" ? os.homedir() : configured.startsWith("~/") ? path.join(os.homedir(), configured.slice(2)) : configured;
 		if (!path.isAbsolute(expanded) || expanded.includes("\0")) throw new Error("goalsRoot / PI_GOAL_ROOT must be an absolute path or ~/path; reload after correcting it.");
-		root = path.normalize(expanded);
-		fs.mkdirSync(root, { recursive: true });
-		if (fs.lstatSync(root).isSymbolicLink()) throw new Error(`Goal root is a symlink: ${root}`);
-		root = fs.realpathSync(root);
+		root = projectGoalRoot(ctx.cwd, path.normalize(expanded));
 		// Metadata lives inside an override without perturbing the pool's mtime.
-		const metadata = path.join(root, ".metadata");
-		fs.mkdirSync(metadata, { recursive: true });
-		if (fs.lstatSync(metadata).isSymbolicLink()) throw new Error(`Goal metadata directory is a symlink: ${metadata}`);
+		ensureRealDirectories(root, [".metadata"]);
 	}
 	roots.set(key, { id, cwd: ctx.cwd, root });
 	return root;
+}
+
+/**
+ * Goal storage is confined to the project: every goal file, ledger, lock and
+ * snapshot Goal X reads or writes stays below ctx.cwd, the directory whose
+ * safety the user already vouches for by running Pi there. A configured root
+ * outside the project (including the project directory itself) is refused
+ * rather than followed; directories between the project and the root are
+ * created one at a time and must be real directories, never symlinks.
+ */
+function projectGoalRoot(cwd: string, configured: string): string {
+	const project = path.resolve(cwd);
+	const relative = path.relative(project, configured);
+	if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new Error(`goalsRoot / PI_GOAL_ROOT must name a directory inside the project (${project}), but ${configured} is ${relative ? "outside it" : "the project directory itself"}. Goal X keeps goal storage within the project directory; choose a subdirectory such as ${path.join(project, ".pi", "goals")} and reload.`);
+	}
+	ensureRealDirectories(project, relative.split(path.sep));
+	return path.join(project, relative);
+}
+
+/** Create each component below `base` without following a symlinked or non-directory component. */
+function ensureRealDirectories(base: string, components: readonly string[]): void {
+	let dir = base;
+	for (const part of components.filter(Boolean)) {
+		dir = path.join(dir, part);
+		try { fs.mkdirSync(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+		const stat = fs.lstatSync(dir);
+		if (stat.isSymbolicLink()) throw new Error(`Goal root is a symlink: ${dir}`);
+		if (!stat.isDirectory()) throw new Error(`Goal root is not a directory: ${dir}`);
+	}
 }
 
 export function goalStorageContext(ctx: GoalStorageContext): GoalStorageContext {
