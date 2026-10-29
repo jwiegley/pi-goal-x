@@ -25,6 +25,7 @@ import {
 	buildBlockerFingerprint,
 	consumeOracleFollowupMarker,
 	hasPendingOracleAdviceForFocusedGoal,
+	rearmOracleAdvice,
 	renderActionableOracleAdvice,
 	renderOracleAdviceReminder,
 	runBlockerOracle,
@@ -322,13 +323,15 @@ pi.registerTool(defineTool({
 	// One actionable result already exists.
 	if (consult.result?.disposition === "actionable") {
 		if (!consult.followupAttempted && !hasPendingOracleAdviceForFocusedGoal(goalAtBlock.id)) {
-			// Re-arm without consulting again and refuse the block.
-			const adviceText = renderOracleAdviceReminder({
+			// Re-arm from the durable result without consulting again, and refuse
+			// the block. A restart drops the session marker; without re-arming,
+			// no follow-up could be recorded and every later block would be refused.
+			const adviceText = renderOracleAdviceReminder(rearmOracleAdvice({
 				goalId: goalAtBlock.id,
 				fingerprint,
 				adviceId: consult.result.adviceId,
 				text: consult.result.summary,
-			});
+			}));
 			return {
 				content: [{ type: "text", text: `${adviceText}\n\nThe goal was NOT marked blocked.` }],
 				details: goalDetails(goalAtBlock),

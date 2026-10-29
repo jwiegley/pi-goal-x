@@ -292,7 +292,7 @@ type OracleSessionFactory = {
 
 // ── armed follow-up marker (session-scoped) ────────────────────────────────
 
-interface ArmedAdvice {
+export interface ArmedAdvice {
 	goalId: string;
 	fingerprint: string;
 	adviceId: string;
@@ -318,6 +318,17 @@ export function armOracleAdvice(goalId: string, fingerprint: string, advice: Ora
 		].filter(Boolean).join("\n"),
 	});
 	return adviceId;
+}
+
+/**
+ * Restore a durable actionable result to the session-scoped follow-up gate.
+ * The marker lives only in memory, so after a restart this is what lets the
+ * next meaningful tool call record the follow-up against the original advice.
+ */
+export function rearmOracleAdvice(advice: ArmedAdvice): ArmedAdvice {
+	const armed = { ...advice };
+	armedByGoalId.set(armed.goalId, armed);
+	return armed;
 }
 
 export function hasPendingOracleAdviceForFocusedGoal(goalId: string): boolean {

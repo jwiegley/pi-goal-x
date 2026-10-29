@@ -25,6 +25,7 @@ import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding
 import goalExtension from "../extensions/goal.ts";
 import { createGoal, goalFocusDetails, normalizeGoalRecord } from "../extensions/goal-record.ts";
 import { parseGoalFile, writeActiveGoalFile } from "../extensions/storage/goal-files.ts";
+import { buildBlockerFingerprint, consumeOracleFollowupMarker, hasPendingOracleAdviceForFocusedGoal } from "../extensions/goal-oracle.ts";
 import { goalLedgerPath } from "../extensions/goal-ledger.ts";
 import { STATE_ENTRY } from "../extensions/goal-format.ts";
 
@@ -405,6 +406,47 @@ test("update_goal(blocked) records a distinct agent-blocked state from active", 
 		assert.equal(blocked!.source, "agent");
 		assert.ok(typeof blocked!.reason === "string" && (blocked!.reason as string).length > 0);
 	} finally {
+		f.cleanup();
+	}
+});
+
+test("update_goal(blocked) re-arms durable actionable Oracle advice after a restart", async () => {
+	const f = makeFixture();
+	try {
+		writeFileSync(path.join(f.cwd, ".pi", "pi-goal-x-settings.json"), JSON.stringify({ oracle: { enabled: true, maxFailedAttemptsPerBlocker: 2 } }));
+		const reason = "The same durable blocker recurred";
+		const fingerprint = buildBlockerFingerprint(f.goal, reason);
+		appendGoalEvent({ cwd: f.cwd }, {
+			type: "oracle_result",
+			goalId: f.goal.id,
+			fingerprint,
+			adviceId: "durable-advice",
+			disposition: "actionable",
+			summary: "Try the durable alternative.",
+			at: "2026-08-04T09:00:00.000Z",
+		});
+		// A new process starts without the in-memory follow-up marker.
+		consumeOracleFollowupMarker(f.goal.id);
+		const h = createHarness({ cwd: f.cwd, sessionEntries: f.sessionEntries });
+		await start(h);
+		const update = h.tools.get("update_goal")!;
+		const refused = await (update.execute as any)("update-oracle-1", { status: "blocked", reason }, undefined, undefined, h.ctx);
+		assert.equal(refused.terminate, false, "the first block after a restart is refused");
+		assert.ok((refused.content?.[0]?.text ?? "").includes("NOT marked blocked"));
+		assert.equal(hasPendingOracleAdviceForFocusedGoal(f.goal.id), true, "the durable advice is re-armed");
+		await h.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "npm test" } }, h.ctx);
+		assert.equal(hasPendingOracleAdviceForFocusedGoal(f.goal.id), false, "meaningful work consumes the marker");
+		assert.deepEqual(
+			ledgerEvents(f.cwd).filter((e) => e.type === "oracle_followup_attempted").map((e) => e.adviceId),
+			["durable-advice"],
+			"the follow-up is recorded against the durable advice",
+		);
+		const blocked = await (update.execute as any)("update-oracle-2", { status: "blocked", reason }, undefined, undefined, h.ctx);
+		assert.equal(blocked.terminate, true, "the block succeeds once the advice was tried");
+		const active = activeGoalFiles(f.cwd);
+		assert.equal(parseGoalFile(path.join(f.cwd, ".pi", "goals", active[0]!))?.status, "blocked");
+	} finally {
+		consumeOracleFollowupMarker(f.goal.id);
 		f.cleanup();
 	}
 });
