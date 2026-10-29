@@ -429,15 +429,23 @@ export function registerGoalCommands(core: GoalCommandsCore): void {
 		// archive. Cancellation above changes no file, focus entry, ledger
 		// entry, or runtime state.
 		core.reconcileFocusedGoalFromDisk(ctx);
-		if (!core.state.isTokenCurrent(focusToken) || !core.state.goal || core.state.goal.id !== target.id) {
+		// The confirmation named one version of the goal; an edit in the
+		// meantime (another session, a tweak) needs a fresh confirmation.
+		if (
+			!core.state.isTokenCurrent(focusToken)
+			|| !core.state.goal
+			|| core.state.goal.id !== target.id
+			|| (core.state.goal.revision ?? 0) !== (target.revision ?? 0)
+		) {
 			ctx.ui.notify(t("Goal changed while confirming; nothing was cleared."), "warning");
 			return;
 		}
-		const archived = core.lifecycle.archive(ctx, "user");
-		const didArchive = !!archived;
+		if (!core.lifecycle.archive(ctx, "user")) {
+			ctx.ui.notify("The goal could not be archived, so it stays open and focused. Refresh and try again.", "warning");
+			return;
+		}
 		core.focus.setGoal(null, ctx, true, "cleared");
-		const msg = clearGoalCommandMessage({ archived: didArchive });
-		ctx.ui.notify(msg, didArchive ? "info" : "warning");
+		ctx.ui.notify(clearGoalCommandMessage({ archived: true }), "info");
 	}
 
 	async function runGoalTweak(replacement: string, ctx: ExtensionContext): Promise<void> {

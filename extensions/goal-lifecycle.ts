@@ -13,7 +13,7 @@ import { newGoalScheduler } from "./goal-scheduler-state.ts";
 import type { GoalScheduler } from "./goal-scheduler.ts";
 import type { GoalService } from "./goal-service.ts";
 import type { GoalSessionState } from "./goal-session-state.ts";
-import { mergeGoalPromptFromDisk } from "./storage/goal-files.ts";
+import { archivedPathForGoal, mergeGoalPromptFromDisk } from "./storage/goal-files.ts";
 import { buildGoalRunningNotification } from "./widgets/goal-notifications.ts";
 import { t } from "./i18n/index.ts";
 
@@ -107,6 +107,13 @@ export class GoalLifecycle {
 			archive: true,
 			commitFocused: false,
 			mutate: (g) => ({ ...g, status: g.status === "complete" ? "complete" : "paused", stopReason: reason }),
+			ledger: (written) => {
+				const archivePath = written.archivedPath ?? archivedPathForGoal(ctx, written);
+				return [
+					...(written.status === "complete" ? [] : [{ type: "goal_aborted" as const, goalId: written.id, reason: reason ?? "unknown", archivePath, at: written.updatedAt }]),
+					{ type: "goal_archived" as const, goalId: written.id, archivePath, at: written.updatedAt },
+				];
+			},
 		});
 		return result.ok ? result.goal : null;
 	}

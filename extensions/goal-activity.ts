@@ -128,7 +128,7 @@ function mapEvent(event: GoalLedgerEvent, taskTitles: ReadonlyMap<string, string
 						: t("Skipped independent completion review (auditor disabled)."),
 			};
 		case "goal_archived":
-			return { at: event.at, kind: "archive", marker: "done", text: t("Archived the completed goal.") };
+			return { at: event.at, kind: "archive", marker: "done", text: t("Archived the goal.") };
 		// Low-value checkpoint noise / focus churn: excluded from the default feed.
 		case "goal_focused":
 		case "goal_unfocused":
