@@ -4,7 +4,7 @@ import type { GoalFileContext } from "./storage/goal-files.ts";
 
 export interface GoalDiagnostic {
 	severity: "warning";
-	source: "ledger" | "storage";
+	source: "ledger" | "storage" | "lock";
 	goalId?: string;
 	eventType?: string;
 	message: string;

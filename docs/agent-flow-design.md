@@ -165,4 +165,5 @@ Escape during an audit offers "complete without audit" or "continue working".
 - **Cross-process safety.** Each goal has a `revision`, and a short per-goal
   lock under `.pi/goals/.locks` guards writes. A stale writer gets a typed
   conflict. `update_goal_task` retries once only if the same task is
-  unchanged.
+  unchanged. Live lock holders are never displaced due to age; release validates
+  ownership. Abandoned ownership gates require offline recovery.

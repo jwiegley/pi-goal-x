@@ -11,7 +11,7 @@ import {
 	readGoalFileSnapshotChecked,
 	type GoalFileSnapshot,
 } from "./storage/goal-files.ts";
-import { acquireGoalLock, type GoalLock } from "./storage/goal-lock.ts";
+import { acquireGoalLock, withGoalLock, type GoalLock } from "./storage/goal-lock.ts";
 import { appendLedgerEventsBestEffort } from "./goal-ledger-sink.ts";
 import { planReconcile } from "./goal-reconcile.ts";
 import { applyTaskBatch, applyTaskUpdate, withUpdatedTask } from "./goal-task-update.ts";
@@ -112,7 +112,7 @@ export class GoalService {
 			// boundary can retry it instead of silently losing the mutation.
 			return null;
 		}
-		try {
+		return this.runUnderGoalLock(lock, goal.id, () => {
 			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, goal);
 			const freshDisk = freshSnapshot?.goal ?? null;
 			const expected = this.turn.base ?? goal;
@@ -130,9 +130,7 @@ export class GoalService {
 			if (this.ref.getFocusedGoalId() === written.id) this.ref.setFocused(written);
 			else this.ref.getPool().set(written.id, written);
 			return written;
-		} finally {
-			lock.release();
-		}
+		});
 	}
 
 	/**
@@ -175,6 +173,14 @@ export class GoalService {
 
 	private appendLedger(ctx: GoalServiceContext, events: GoalLedgerEvent[]): boolean {
 		return appendLedgerEventsBestEffort(ctx, events, diagnostic => this.ref.onDiagnostic(diagnostic));
+	}
+
+	private reportGoalLockReleaseFailure(goalId: string, error: unknown): void {
+		this.ref.onDiagnostic({ severity: "warning", source: "lock", goalId, message: `Goal lock release failed after the operation completed; its result was preserved: ${error instanceof Error ? error.message : String(error)}` });
+	}
+
+	private runUnderGoalLock<T>(lock: GoalLock, goalId: string, body: () => T): T {
+		return withGoalLock(lock, body, error => this.reportGoalLockReleaseFailure(goalId, error));
 	}
 
 	/** Safe focused record reconciliation from disk. */
@@ -306,7 +312,7 @@ export class GoalService {
 	private applyLocked(ctx: GoalServiceContext, spec: GoalMutationSpec, current: GoalRecord): GoalMutationOutcome {
 		const capturedRevision = current.revision ?? 0;
 		const lock = acquireGoalLock(ctx, current.id);
-		try {
+		return this.runUnderGoalLock(lock, current.id, (): GoalMutationOutcome => {
 			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, current);
 			const freshDisk = freshSnapshot?.goal ?? null;
 			if (!freshSnapshot || !freshDisk) {
@@ -332,9 +338,7 @@ export class GoalService {
 			this.appendLedger(ctx, ledgerEventsFor(spec, written));
 
 			return this.commitMutation(spec, current.id, written);
-		} finally {
-			lock.release();
-		}
+		});
 	}
 
 	/** In-memory pool/focus commit and runtime/UI effects of a written mutation. */
@@ -393,11 +397,9 @@ export class GoalService {
 		if (!this.reconcileFocused(ctx)) return { ok: false, message: NO_FOCUSED_GOAL };
 		const current = this.ref.getFocused();
 		if (!current?.taskList) return { ok: false, message: NO_TASK_LIST };
-		let lock: GoalLock | undefined;
-		try {
+		const run = (): GoalMutationOutcome => {
 			let base = current;
 			if (!this.turn.active) {
-				lock = acquireGoalLock(ctx, current.id);
 				const fresh = this.readFreshDiskGoal(ctx, current);
 				if (!fresh || (fresh.revision ?? 0) !== (current.revision ?? 0)) return { ok: false, message: "The goal changed in another process; no updates applied. Refresh and retry." };
 				if (fresh.status !== "active" || !fresh.taskList) return { ok: false, message: "The persisted goal is no longer active with tasks; no updates applied." };
@@ -412,7 +414,8 @@ export class GoalService {
 			this.usage.track(written.id, written.usage);
 			this.ref.setFocused(written);
 			return { ok: true, goal: written, previousGoalId: current.id, goalId: written.id, focusChanged: false };
-		} finally { lock?.release(); }
+		};
+		return this.turn.active ? run() : this.runUnderGoalLock(acquireGoalLock(ctx, current.id), current.id, run);
 	}
 
 	private updateTaskAttempt(ctx: GoalServiceContext, spec: GoalTaskUpdateSpec, retriesLeft: number): GoalTaskUpdateOutcome {
@@ -426,16 +429,20 @@ export class GoalService {
 		}
 		const capturedRevision = current.revision ?? 0;
 		const lock = acquireGoalLock(ctx, current.id);
-		try {
+		let retryRequested = false;
+		let retryReleaseFailed = false;
+		let retryReleaseError: unknown;
+		const outcome = withGoalLock<GoalTaskUpdateOutcome | null>(lock, () => {
 			const freshDisk = this.readFreshDiskGoal(ctx, current);
 			if (!freshDisk) {
 				return { ok: false, message: `Goal ${current.id} was deleted or archived by another process while the task update was in progress; the task was not updated.` };
 			}
 			const diskRevision = freshDisk.revision ?? 0;
 			if (diskRevision !== capturedRevision) {
-				// Retry once against the fresh state; the transition validation
-				// below is the guard for task status/structure changes.
-				if (retriesLeft > 0) return this.updateTaskAttempt(ctx, spec, retriesLeft - 1);
+				if (retriesLeft > 0) {
+					retryRequested = true;
+					return null;
+				}
 				return { ok: false, message: `Goal ${current.id} was modified by another process (revision ${capturedRevision} -> ${diskRevision}); current revision is ${diskRevision}. The task was not updated.` };
 			}
 			const base = { ...current, objective: freshDisk.objective };
@@ -447,9 +454,12 @@ export class GoalService {
 			this.appendLedger(ctx, this.taskLedgerEvents(spec, written, updatedTask));
 			this.ref.setFocused(written);
 			return { ok: true, goal: written, task: updatedTask };
-		} finally {
-			lock.release();
-		}
+		}, (error) => {
+			if (retryRequested) { retryReleaseFailed = true; retryReleaseError = error; }
+			else this.reportGoalLockReleaseFailure(current.id, error);
+		});
+		if (retryReleaseFailed) throw retryReleaseError;
+		return retryRequested ? this.updateTaskAttempt(ctx, spec, retriesLeft - 1) : outcome!;
 	}
 
 	/** Ledger events for a task update. An unexpected spec error keeps the state transition and is reported. */
@@ -503,7 +513,7 @@ export class GoalService {
 			// Another writer holds the goal lock; skip this persist tick.
 			return null;
 		}
-		try {
+		return this.runUnderGoalLock(lock, current.id, () => {
 			const freshSnapshot = this.readFreshDiskGoalSnapshot(ctx, current);
 			const freshDisk = freshSnapshot?.goal ?? null;
 			if (!freshSnapshot || !freshDisk) return null;
@@ -522,9 +532,7 @@ export class GoalService {
 				return this.writeFocused(ctx, merged, freshSnapshot);
 			}
 			return this.writeFocused(ctx, { ...current, objective: freshDisk.objective, updatedAt: nowIso(), revision: capturedRevision + 1 }, freshSnapshot);
-		} finally {
-			lock.release();
-		}
+		});
 	}
 
 	/** Create a goal: write active file → ledger → memory/focus commit. */

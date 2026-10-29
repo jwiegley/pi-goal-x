@@ -293,6 +293,8 @@ as truncated. Checkpoint reuse validates ledger identity and fixed-size anchors;
 the append-only contract excludes rewrites elsewhere in the covered prefix.
 Appends are serialized by a private SQLite lock and verified against the ledger
 inode. Ambiguous append failures are reported without event-by-event retries.
+Per-goal locks carry ownership tokens; live owners are never displaced by age.
+Release validates ownership, and abandoned ownership gates require offline recovery.
 ## Tests
 
 ```bash

@@ -133,6 +133,14 @@ export function discardCreatedRegularFile(
 	return "removed";
 }
 
+/**
+ * A protected file or its path changed identity, size, timestamps or bytes
+ * while it was being opened or read, typically because another process renamed,
+ * replaced or removed it at that moment. Callers decide whether that is
+ * contention to retry or a failure.
+ */
+export class ProtectedFileChangedError extends Error {}
+
 /** Open one regular file descriptor without following the final path component. */
 export function openRegularFile(
 	root: string,
@@ -151,7 +159,7 @@ export function openRegularFile(
 		assertSafeFileAncestors(root, filePath);
 		const linked = fs.lstatSync(filePath);
 		if (linked.isSymbolicLink() || !linked.isFile() || linked.dev !== stat.dev || linked.ino !== stat.ino) {
-			throw new Error(`Protected path changed while it was being opened: ${filePath}`);
+			throw new ProtectedFileChangedError(`Protected path changed while it was being opened: ${filePath}`);
 		}
 		return { fd, identity: identityOf(stat) };
 	} catch (error) {
@@ -239,9 +247,9 @@ export function readRegularFile(
 			|| after.mtimeMs !== opened.identity.mtimeMs
 			|| after.ctimeMs !== opened.identity.ctimeMs
 			|| used !== opened.identity.size
-		) throw new Error(`Protected file changed while it was being read: ${filePath}`);
+		) throw new ProtectedFileChangedError(`Protected file changed while it was being read: ${filePath}`);
 		if (!descriptorMatchesBytes(opened.fd, bytes)) {
-			throw new Error(`Protected file changed while it was being read: ${filePath}`);
+			throw new ProtectedFileChangedError(`Protected file changed while it was being read: ${filePath}`);
 		}
 		const verified = fs.fstatSync(opened.fd);
 		if (
@@ -250,7 +258,7 @@ export function readRegularFile(
 			|| verified.size !== after.size
 			|| verified.mtimeMs !== after.mtimeMs
 			|| verified.ctimeMs !== after.ctimeMs
-		) throw new Error(`Protected file changed while it was being read: ${filePath}`);
+		) throw new ProtectedFileChangedError(`Protected file changed while it was being read: ${filePath}`);
 		assertSafeFileAncestors(root, filePath);
 		const linked = fs.lstatSync(filePath);
 		if (
@@ -262,7 +270,7 @@ export function readRegularFile(
 			|| linked.mtimeMs !== verified.mtimeMs
 			|| linked.ctimeMs !== verified.ctimeMs
 		) {
-			throw new Error(`Protected path changed while it was being read: ${filePath}`);
+			throw new ProtectedFileChangedError(`Protected path changed while it was being read: ${filePath}`);
 		}
 		return { ...identityOf(verified), bytes };
 	} finally {
@@ -315,9 +323,9 @@ export async function readRegularFileAsync(
 			|| after.mtimeMs !== before.mtimeMs
 			|| after.ctimeMs !== before.ctimeMs
 			|| used !== before.size
-		) throw new Error(`Protected file changed while it was being read: ${filePath}`);
+		) throw new ProtectedFileChangedError(`Protected file changed while it was being read: ${filePath}`);
 		if (!(await descriptorMatchesBytesAsync(handle, bytes))) {
-			throw new Error(`Protected file changed while it was being read: ${filePath}`);
+			throw new ProtectedFileChangedError(`Protected file changed while it was being read: ${filePath}`);
 		}
 		const verified = await handle.stat();
 		if (
@@ -326,7 +334,7 @@ export async function readRegularFileAsync(
 			|| verified.size !== after.size
 			|| verified.mtimeMs !== after.mtimeMs
 			|| verified.ctimeMs !== after.ctimeMs
-		) throw new Error(`Protected file changed while it was being read: ${filePath}`);
+		) throw new ProtectedFileChangedError(`Protected file changed while it was being read: ${filePath}`);
 		assertSafeFileAncestors(root, filePath);
 		const linked = await fs.promises.lstat(filePath);
 		if (
@@ -337,7 +345,7 @@ export async function readRegularFileAsync(
 			|| linked.size !== verified.size
 			|| linked.mtimeMs !== verified.mtimeMs
 			|| linked.ctimeMs !== verified.ctimeMs
-		) throw new Error(`Protected path changed while it was being read: ${filePath}`);
+		) throw new ProtectedFileChangedError(`Protected path changed while it was being read: ${filePath}`);
 		return { ...identityOf(verified), bytes };
 	} finally {
 		try {
