@@ -14,6 +14,7 @@ All notable changes to pi-goal-x are documented here.
 - Never take over a live goal lock because of its age, and release only the lock the holder created. Task-update retries no longer time out on their own lock, and a release failure after a committed write is reported instead of failing the write.
 - `/goal-recovery repair` archives completed goals stranded at active paths, backfills their ledger events, and reports every failed step.
 - `/goal-clear` refuses a goal edited while its confirmation was open, keeps the goal focused when archival fails, and records the archive in the ledger.
+- Refuse to skip a task that is already skipped, instead of rewriting the goal and recording the skip again.
 - Report a goal change whose ledger events could not be built, instead of silently recording the change without them.
 - After a restart, a blocker that already has actionable Oracle advice re-arms that advice, so the next meaningful work records the follow-up and a later block can succeed. Previously every later block was refused.
 

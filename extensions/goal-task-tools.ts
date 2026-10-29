@@ -60,6 +60,7 @@ function progressSpec(input: TaskProgressInput, core: TaskToolsCore, ctx: Extens
 				if (gate) return {ok: false, message: gate};
 			}
 			if (input.status === "skipped" && !reason) return {ok: false, message: "status=skipped requires a non-empty reason."};
+			if (input.status === "skipped" && task.status === "skipped") return {ok: false, message: `Task "${task.id}" was already skipped.`};
 			if (input.status === "pending" && task.status !== "skipped") return {ok: false, message: "Only skipped tasks can be reopened with status=pending."};
 			return {ok: true};
 		},
@@ -276,6 +277,7 @@ export function registerTaskTools(core: TaskToolsCore): void {
 				return updateOne({
 					validate: (task) => {
 						if (task.status === "complete") return { ok: false, message: `Task "${taskId}" is already complete.` };
+						if (task.status === "skipped") return { ok: false, message: `Task "${taskId}" was already skipped.` };
 						return { ok: true };
 					},
 					update: (task) => {
