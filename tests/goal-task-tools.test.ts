@@ -258,6 +258,31 @@ test("update_goal_task(skipped) requires a reason and cascades to subtasks", asy
 	}
 });
 
+test("update_goal_task refuses to skip an already skipped task, singly or in a batch", async () => {
+	const f = fixtureWithTasks([
+		{ id: "t1", title: "First", status: "pending" },
+		{ id: "t2", title: "Second", status: "pending" },
+	]);
+	try {
+		const h = createHarness(f.cwd, f.sessionEntries);
+		await h.handlers.get("session_start")?.({ reason: "start" }, h.ctx);
+		await h.handlers.get("before_agent_start")?.({ systemPrompt: "base", prompt: "go", systemPromptOptions: {} }, h.ctx);
+		const tool = h.tools.get("update_goal_task")!;
+		await (tool.execute as any)("skip-1", { task_id: "t1", status: "skipped", reason: "user direction" }, undefined, undefined, h.ctx);
+		const activePath = path.join(f.cwd, ".pi", "goals", readdirSync(path.join(f.cwd, ".pi", "goals")).find((n) => n.startsWith("active_goal_"))!);
+		const skippedBytes = readFileSync(activePath);
+		const again = await (tool.execute as any)("skip-2", { task_id: "t1", status: "skipped", reason: "user direction" }, undefined, undefined, h.ctx);
+		assert.ok((again.content?.[0]?.text ?? "").includes("was already skipped"));
+		const batch = await (tool.execute as any)("skip-3", { updates: [{ task_id: "t1", status: "skipped", reason: "again" }] }, undefined, undefined, h.ctx);
+		assert.ok((batch.content?.[0]?.text ?? "").includes("was already skipped"));
+		assert.deepEqual(readFileSync(activePath), skippedBytes, "the goal is not rewritten");
+		assert.equal(ledgerEvents(f.cwd).filter((e) => e.type === "task_skipped").length, 1, "no duplicate task_skipped event");
+		assert.equal(activeGoal(f.cwd)?.taskList?.tasks[1]?.status, "pending");
+	} finally {
+		f.cleanup();
+	}
+});
+
 test("update_goal_task(pending) reopens a skipped task; completed tasks are immutable", async () => {
 	const cwd = mkdtempSync(path.join(tmpdir(), "goal-task-pending-"));
 	mkdirSync(path.join(cwd, ".pi", "goals", "archived"), { recursive: true });

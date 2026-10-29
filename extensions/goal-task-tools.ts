@@ -219,6 +219,7 @@ function progressSpec(input: TaskProgressInput, core: import("./goal-state.ts").
     if (gate) return {ok: false, message: gate};
    }
    if (input.status === "skipped" && !reason) return {ok: false, message: "status=skipped requires a non-empty reason."};
+   if (input.status === "skipped" && task.status === "skipped") return {ok: false, message: `Task "${task.id}" was already skipped.`};
    if (input.status === "pending" && task.status !== "skipped") return {ok: false, message: "Only skipped tasks can be reopened with status=pending."};
    return {ok: true};
   },
@@ -523,6 +524,8 @@ pi.registerTool(defineTool({
 				taskId: params.task_id,
 				validate: (task) => {
 					if (task.status === "complete") return { ok: false, message: `Task "${params.task_id}" is already complete.` };
+					// A repeated skip would rewrite the goal and append a duplicate event.
+					if (task.status === "skipped") return { ok: false, message: `Task "${params.task_id}" was already skipped.` };
 					return { ok: true };
 				},
 				update: (task) => {
