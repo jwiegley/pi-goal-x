@@ -128,8 +128,13 @@ Session focus is separate. Focus changes append a custom session entry:
 
 Because this is stored with `pi.appendEntry("pi-goal-focus", ...)`, it is
 session/branch-local and is not sent to the LLM. On `session_start` and
-`session_tree`, `loadState(ctx)` scans `ctx.sessionManager.getBranch()` for the
-latest focus entry, scans active goal files, and resolves focus as follows:
+`session_tree`, `loadState(ctx)` reads the latest active-branch focus and legacy
+state entries, scans active goal files, and resolves focus as follows. Hosts
+with indexed session history answer those lookups with
+`getLatestCustomEntry(type, { scope: "active" })`, so the session's length does
+not matter; other hosts fall back to one reverse scan of
+`ctx.sessionManager.getBranch()` that stops at the first matches. Draft
+rehydration reads its `pi-goal-draft` entry the same way.
 
 1. Use a valid focused id from the latest focus entry.
 2. If the latest focus entry explicitly has `focusedGoalId: null`, or points at

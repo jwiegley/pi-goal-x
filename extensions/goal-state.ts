@@ -39,6 +39,7 @@ import { newGoalScheduler } from "./goal-scheduler-state.ts";
 import { GoalScheduler } from "./goal-scheduler.ts";
 import { GoalRuntime } from "./goal-runtime.ts";
 import { GoalAuditMessages } from "./goal-session-safety.ts";
+import { latestActiveCustomEntries } from "./goal-session-entries.ts";
 import {
 	focusedGoalFromPool,
 	openGoalsFromPool,
@@ -747,7 +748,10 @@ export function createGoalCore(
 	async function loadState(ctx: ExtensionContext): Promise<void> {
   const revision = ++focusRevision;
   const storage = goalStorageContext(ctx);
-  const entries = ctx.sessionManager.getBranch();
+  // Only the newest focus and legacy state entries matter; never walk the
+  // whole branch when the host can answer those two queries directly.
+  const latest = latestActiveCustomEntries(ctx.sessionManager, [FOCUS_ENTRY, STATE_ENTRY], (customType, entry) =>
+   customType !== FOCUS_ENTRY || normalizeGoalFocusEntry(entry.data) !== null);
   const settings = loadGoalSettings(storage.cwd);
   const pool = await readActiveGoalPoolAsync(storage);
   if (revision !== focusRevision) return;
@@ -759,21 +763,8 @@ export function createGoalCore(
 		tasksEnabled = !loadGoalSettings(ctx.cwd).disableTasks;
 		assignFocusedGoalId(null);
 		hasExplicitSessionFocus = false;
-		let focusEntry: GoalFocusEntry | null = null;
-		let legacyGoal: GoalRecord | null = null;
-		let legacyStateSeen = false;
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i] as { type?: string; customType?: string; data?: unknown };
-			if (entry.type !== "custom") continue;
-			if (!focusEntry && entry.customType === FOCUS_ENTRY) {
-				focusEntry = normalizeGoalFocusEntry(entry.data);
-			}
-			if (!legacyStateSeen && entry.customType === STATE_ENTRY) {
-				legacyGoal = normalizeGoalRecord(asRecord(entry.data)?.goal);
-				legacyStateSeen = true;
-			}
-			if (focusEntry && legacyStateSeen) break;
-		}
+		let focusEntry: GoalFocusEntry | null = normalizeGoalFocusEntry(latest.get(FOCUS_ENTRY)?.data);
+		let legacyGoal: GoalRecord | null = normalizeGoalRecord(asRecord(latest.get(STATE_ENTRY)?.data)?.goal);
 		if (legacyGoal && legacyGoal.status !== "complete") {
 			legacyGoal = sanitizeGoalPaths(ctx, mergeGoalPromptFromDisk(ctx, legacyGoal));
 		}
