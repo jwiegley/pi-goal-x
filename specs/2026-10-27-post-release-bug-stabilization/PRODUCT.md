@@ -1,14 +1,14 @@
 # Post-release bug stabilization
 
-Status: implemented; approved for merge and patch release
+Status: completed; 0.34.1 published and verified
 
-Release target: 0.34.1, bug fixes first
+Release: 0.34.1, bug fixes first
 
 Planning baseline: `fe0e38f` (0.34.0 main)
 
-Rechecked on 2026-10-27 against all five open issues and six source PRs. The released `v0.34.0` tag points to `8f0c28b`; its runtime, dependencies and tests are identical to `fe0e38f`. The implementation is in [PR #118](https://github.com/tmonk/pi-goal-x/pull/118). Runtime commit `584a469` passed the integrated gates; `MILESTONES.md` records the fixes, review decisions and artifact evidence. The user's latest direction removes Windows from CI and validation, superseding the earlier platform requirement. The older open-PR disposition document is historical. Version 0.34.1 is prepared and tested, not published.
+Rechecked on 2026-10-27 against all five open issues and six source PRs. The released `v0.34.0` tag points to `8f0c28b`; its runtime, dependencies and tests are identical to `fe0e38f`. [PR #118](https://github.com/tmonk/pi-goal-x/pull/118) merged as `27d9fac`, and [0.34.1](https://github.com/tmonk/pi-goal-x/releases/tag/v0.34.1) is published and verified as npm's `latest`. `MILESTONES.md` records the fixes, review decisions and exact artifact evidence. Windows CI and its native harness were removed, superseding the earlier platform requirement. The older open-PR disposition document is historical.
 
-The user has authorized merging #118 to main and publishing the patch release. Preserve the verified GitHub co-author commits, use the existing tagged trusted-publishing workflow, and verify the published registry artifact and `latest` before marking the release complete.
+The merge preserved the verified GitHub co-author commits. The signed release tag points to the tested main commit. The trusted-publishing workflow passed, and the npm download, GitHub release asset and tested workflow tarball match byte for byte. The registry download also passed the installed-package regressions.
 
 ## Why this work comes first
 

@@ -386,3 +386,23 @@ The previous cleanup is complete: PRs #109/#111/#112/#116/#117 and issues #110/#
 The user authorized merging #118 to main and publishing a patch release. GitHub confirms @adlternative, @Nyarlathoteppppp, @Has-X and @expoli as co-authors on the five corresponding fix commits. [CI run 40539398945](https://github.com/tmonk/pi-goal-x/actions/runs/40539398945) passed on `8fb11cb7a89543e290099277006e1b3b74ee0b30`; every rewritten implementation tree is identical to its previously tested tree.
 
 Release preflight found npm `latest` at 0.34.0, no published 0.34.1, no `v0.34.1` tag, matching package/lock metadata at 0.34.1, and #118 mergeable against unchanged main `fe0e38f`. Finalized the changelog date and release heading. The existing workflow will publish from the tested main tag, preserve automated ranking badge updates, smoke-test its exact tarball and verify registry integrity. Merge, tag, workflow and installed-registry verification results follow as they complete.
+
+### 0.34.1 merged, published and verified
+
+[Final PR CI](https://github.com/tmonk/pi-goal-x/actions/runs/40540656693) passed on `49675e4`. #118 merged with a merge commit, `27d9facf49e66ee677770a74e26198a8bdcada8a`, preserving all five co-authored fixes and GitHub's association with @adlternative, @Nyarlathoteppppp, @Has-X and @expoli. [Main CI](https://github.com/tmonk/pi-goal-x/actions/runs/40541211633) then passed on that exact merge commit. The signed annotated `v0.34.1` tag points to it.
+
+[Publication run 40541749002](https://github.com/tmonk/pi-goal-x/actions/runs/40541749002) succeeded on its first attempt: ranking, source validation, 1,298 tests, provider/context/cache gates, production audit, exact-tarball 133-test smoke, trusted npm publication with provenance, registry verification and GitHub release creation. Registry metadata took about three minutes to appear; the existing verification polls completed without another publish. Automated ranking commit `9d53f44` updated only the README ranking badges/text and ranking assets.
+
+Downloaded the workflow artifact through the GitHub connector and checked its ZIP SHA-256 against GitHub's artifact metadata. Independently downloaded npm's 0.34.1 tarball and the GitHub release asset: both match the tested workflow tarball byte for byte. Registry version and `latest` are both 0.34.1. The registry download passed all 133 installed-package tests with zero failures/skips and the real Responses/auditor completion-and-archival smoke on local Node 26.10/Pi 1.4. Publication used Node 24; minimum-runtime validation used Node 22.19. No paid live-provider cache-hit claim is made.
+
+| Release evidence | Value |
+| --- | --- |
+| Source/tag commit | `27d9facf49e66ee677770a74e26198a8bdcada8a` |
+| Tarball SHA-256 | `1e46fc3245e9dd4e7e26b67fe9a065f6c33bf0764c43f674a88011b138e215f4` |
+| npm SHA-1 | `bdf3915bdbb0cb238c3e23322c07825dbb82f6ff` |
+| npm integrity | `sha512-uWtllp3/WjNBbb6YqPduiEsr2K6FGewTty4C94j7yjpvOcKKI4tuJobee2dF5TY8gXvQsLGyKR38sd1WA3TkJQ==` |
+| Publication artifact | `12750044097` (`npm-v0.34.1-1`); ZIP SHA-256 `103a04b8a1d7cf4c1f906a813691a9f2142aa7a6e8d6b65df0d13076c8340f85` |
+| Registry receipt artifact | `12751745539` (`registry-v0.34.1-1`) |
+| Local evidence | `/tmp/pi-goal-release-0.34.1.ddmj6w/verification.json`, `workflow/`, `registry-smoke/` |
+
+Updated the GitHub release notes with the fixes, default-off context display and contributor credit. The implementation and release are complete. #108 remains open for the unproven cache design change; #96 remains deferred. This final record changes spec documents only and does not change the released package.

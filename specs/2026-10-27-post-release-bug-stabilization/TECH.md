@@ -1,6 +1,6 @@
 # Technical plan
 
-Implementation status: release candidate in [PR #118](https://github.com/tmonk/pi-goal-x/pull/118), runtime commit `584a469152bae62ca1fae59a158e12f75011a3c3`. Prior integrated validation is recorded in `MILESTONES.md`. The user's final cleanup removes Windows CI and its native harness; the revised Linux Node 22.19/Pi 1.4 checks must pass before closing superseded work. Publication remains a subsequent release operation.
+Implementation status: completed and published as [0.34.1](https://github.com/tmonk/pi-goal-x/releases/tag/v0.34.1). [PR #118](https://github.com/tmonk/pi-goal-x/pull/118) merged as `27d9facf49e66ee677770a74e26198a8bdcada8a`, preserving all five co-authored fix commits. [Main CI](https://github.com/tmonk/pi-goal-x/actions/runs/40541211633) passed the Linux Node 22.19/Pi 1.4 checks, and the [release workflow](https://github.com/tmonk/pi-goal-x/actions/runs/40541749002) published its tested tarball with provenance. The registry download matches the workflow tarball and GitHub asset and passed its installed-package regressions. The following sections retain the acceptance contract; exact release evidence is recorded in `MILESTONES.md`.
 
 ## 1. Evidence baseline
 
