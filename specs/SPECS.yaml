@@ -121,3 +121,10 @@ specs:
     focused: false
     last_audit: null
     updated: 2026-10-02
+  - id: 2026-11-23-draft-router-level
+    path: specs/2026-11-23-draft-router-level
+    title: Router level for a new goal's drafting prompt
+    status: completed
+    focused: false
+    last_audit: null
+    updated: 2026-11-23

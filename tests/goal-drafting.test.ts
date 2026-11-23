@@ -1420,3 +1420,49 @@ test("a draft hides the unfocused reminder", async () => {
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
+// ── Router level for a new goal's drafting prompt ─────────────────────────
+
+/** The drafting prompt /COMMAND sends with MODEL selected and Pi idle or not. */
+async function draftPromptFor(command: string, model: unknown, idle = true): Promise<string> {
+	const cwd = tempDir("goal-draft-router-");
+	mkdirSync(path.join(cwd, ".pi", "goals", "archived"), { recursive: true });
+	try {
+		const h = createHarness(cwd);
+		await h.sessionStart();
+		const ctx = h.ctx as unknown as { model: unknown; isIdle: () => boolean };
+		ctx.model = model;
+		ctx.isIdle = () => idle;
+		await h.commands.get(command)!.handler("Ship a small feature", h.ctx);
+		assert.equal(h.messages.length, 1, "one drafting prompt is sent");
+		return h.messages[0]!;
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+}
+
+const ROUTER_AUTO = { provider: "smart-router", id: "auto" };
+
+test("/goal and /sisyphus on smart-router/auto ask the router for the SUPER level", async () => {
+	for (const command of ["goal", "sisyphus"]) {
+		const prompt = await draftPromptFor(command, ROUTER_AUTO);
+		assert.match(prompt, /^\[GOAL CONFIRMATION focus=/, command);
+		// pi-smart-router reads a level tag only as the message's last whitespace-separated token.
+		assert.ok(prompt.endsWith("\n#super"), `${command}: the prompt must end with the router's tag`);
+		assert.equal(prompt.split("#super").length, 2, `${command}: exactly one tag`);
+	}
+});
+
+test("a drafting prompt carries no router tag where no router would remove it", async () => {
+	for (const model of [undefined, { provider: "smart-router", id: "local" }, { provider: "openai-codex", id: "auto" }, { provider: "omlx-hera", id: "DeepSeek" }]) {
+		for (const command of ["goal", "sisyphus"]) {
+			const prompt = await draftPromptFor(command, model);
+			assert.ok(!prompt.includes("#super"), `${command} on ${JSON.stringify(model)}`);
+		}
+	}
+});
+
+test("a drafting prompt sent while Pi is busy carries no router tag", async () => {
+	// The router plans levels only for an idle input: a steer's tag would be removed with a warning.
+	const prompt = await draftPromptFor("goal", ROUTER_AUTO, false);
+	assert.ok(!prompt.includes("#super"));
+});

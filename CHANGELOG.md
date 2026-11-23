@@ -4,6 +4,10 @@ All notable changes to pi-goal-x are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- `/goal` and `/sisyphus` ask pi-smart-router for its SUPER level: on `smart-router/auto`, with Pi idle, the drafting prompt ends with the router's `#super` tag, which the router removes before the model sees it. Other models, `smart-router/local`, a busy session and `/goal-tweak` are unchanged.
+
 ### Fixed
 
 - Read the latest focus, state and draft entries without walking the session branch, using Pi's latest-entry lookup when the host provides it.

@@ -158,6 +158,22 @@ function tweakDraftPrompt(topic: string, targetGoal: GoalRecord | undefined): st
 		"User request:", topic || "(ask what they want to change)",
 	].join("\n");
 }
+/**
+ * pi-smart-router's level tag for a new goal's drafting prompt: drafting a goal contract is the
+ * session's planning work, so /goal and /sisyphus ask the router for its SUPER level (John,
+ * 2026-11-23). The router reads a tag only as the last token of an idle input, removes it before
+ * the model sees the message, and remembers the level for the runs that follow. The tag is added
+ * only where that router will remove it: smart-router/auto selected and Pi idle. On any other
+ * model it would reach the model as text, on smart-router/local a level without local models is
+ * refused, and a steer's tag is dropped with a warning. A tweak of an existing goal is not tagged.
+ */
+const ROUTER_SUPER_TAG = "#super";
+
+function routerLevelTag(ctx: ExtensionContext, mode: GoalDraftMode): string {
+	if (mode === "tweak" || !ctx.isIdle()) return "";
+	const model = ctx.model as { provider?: unknown; id?: unknown } | undefined;
+	return model?.provider === "smart-router" && model.id === "auto" ? "\n" + ROUTER_SUPER_TAG : "";
+}
 
 export async function startGoalDrafting(core: GoalDraftingCore, ctx: ExtensionContext, mode: GoalDraftMode, topic: string, targetGoal?: GoalRecord): Promise<void> {
 	const trimmed = topic.trim();
@@ -192,7 +208,7 @@ export async function startGoalDrafting(core: GoalDraftingCore, ctx: ExtensionCo
 	ctx.ui.notify(trimmed
 		? t("{label} started: {topic}. The agent will clarify, propose a goal and tasks where useful, then ask you to confirm.", { label, topic: trimmed.slice(0, 60) })
 		: t("{label} started. The agent will clarify, propose a goal and tasks where useful, then ask you to confirm.", { label }), "info");
-	const prompt = mode === "tweak" ? tweakDraftPrompt(trimmed, targetGoal) : goalDraftingPrompt(trimmed, mode, core.loadedCommands);
+	const prompt = mode === "tweak" ? tweakDraftPrompt(trimmed, targetGoal) : goalDraftingPrompt(trimmed, mode, core.loadedCommands) + routerLevelTag(ctx, mode);
 	try {
 		core.pi.sendUserMessage(prompt, { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
 	} catch (err) {
