@@ -123,14 +123,14 @@ test("context normalization preserves all marker positions and ignores mutable g
 test("cold pool results do not expose the cached Map and archive updates remove timestamped paths from snapshots", async () => {
 	const f=fixture(); try {
 		const goal=writeActiveGoalFile(f,f.goal); invalidateGoalPoolCache();
-  readActiveGoalPool(f).clear(); assert.equal(readActiveGoalPool(f).size,1);
-  invalidateGoalPoolCache(); (await readActiveGoalPoolAsync(f)).clear(); assert.equal(readActiveGoalPool(f).size,1);
-  archiveGoalFile(f,goal);
-  // Archival discards the derived snapshot rather than publishing a remove-only
-  // delta a successor could race; the next cold read rescans and rewrites it.
-  assert.equal(fs.existsSync(path.join(f.cwd,".pi/.goals-pool-snapshot.json")),false);
-  invalidateGoalPoolCache(); assert.equal(readActiveGoalPool(f).size,0);
-  const snapshot=JSON.parse(fs.readFileSync(path.join(f.cwd,".pi/.goals-pool-snapshot.json"),"utf8")); assert.deepEqual(snapshot.goals,[]);
+		readActiveGoalPool(f).clear(); assert.equal(readActiveGoalPool(f).size,1);
+		invalidateGoalPoolCache(); (await readActiveGoalPoolAsync(f)).clear(); assert.equal(readActiveGoalPool(f).size,1);
+		archiveGoalFile(f,goal);
+		// Archival discards the derived snapshot rather than publishing a remove-only
+		// delta a successor could race; the next cold read rescans and rewrites it.
+		assert.equal(fs.existsSync(path.join(f.cwd,".pi/.goals-pool-snapshot.json")),false);
+		invalidateGoalPoolCache(); assert.equal(readActiveGoalPool(f).size,0);
+		const snapshot=JSON.parse(fs.readFileSync(path.join(f.cwd,".pi/.goals-pool-snapshot.json"),"utf8")); assert.deepEqual(snapshot.goals,[]);
 	} finally {f.cleanup();invalidateGoalPoolCache();}
 });
 
@@ -152,18 +152,18 @@ test("task updates copy only changed ancestors and leave unrelated branches and 
 test("Oracle state survives checkpoint reload and corrupt derived state rebuilds from the ledger", () => {
 	const f=fixture(); try {
 		appendGoalEvents(f,[{type:"goal_created",goalId:f.goal.id,objective:f.goal.objective,sisyphus:false,autoContinue:true,at:"2026-09-07"}, {type:"oracle_result",goalId:f.goal.id,fingerprint:"fp",adviceId:"advice",disposition:"actionable",summary:"Try the verified alternative 🧭",at:"2026-09-07"}, {type:"audit_result",goalId:f.goal.id,verdict:"disapproved",report:"Recheck 🧭",at:"2026-09-07"}]);
-  const oracle={result:{adviceId:"advice",disposition:"actionable",summary:"Try the verified alternative 🧭"},failedAttempts:0,followupAttempted:false};
-  invalidateGoalLedgerCache(); const full=readGoalLedgerForGoal(f,f.goal.id);
-  invalidateGoalLedgerCache(); const cached=readGoalLedgerForGoal(f,f.goal.id);
-  assert.deepEqual(cached,{...full,revision:cached.revision});
-  // Oracle state is reduced from the authoritative ledger, never from derived state.
-  assert.deepEqual(goalOracleState(f,f.goal.id,"fp"),oracle);
-  const file=path.join(f.cwd,".pi/goals",LEDGER_CHECKPOINT_FILE);
+		const oracle={result:{adviceId:"advice",disposition:"actionable",summary:"Try the verified alternative 🧭"},failedAttempts:0,followupAttempted:false};
+		invalidateGoalLedgerCache(); const full=readGoalLedgerForGoal(f,f.goal.id);
+		invalidateGoalLedgerCache(); const cached=readGoalLedgerForGoal(f,f.goal.id);
+		assert.deepEqual(cached,{...full,revision:cached.revision});
+		// Oracle state is reduced from the authoritative ledger, never from derived state.
+		assert.deepEqual(goalOracleState(f,f.goal.id,"fp"),oracle);
+		const file=path.join(f.cwd,".pi/goals",LEDGER_CHECKPOINT_FILE);
 		const valid=JSON.parse(fs.readFileSync(file,"utf8"));
 		for (const damage of [(copy: typeof valid) => {copy.projection.audit.verdict="invalid";}, (copy: typeof valid) => {copy.events[1].summary=null;}, (copy: typeof valid) => {delete copy.identity;}]) {
 			const copy=structuredClone(valid); damage(copy); fs.writeFileSync(file,JSON.stringify(copy)); invalidateGoalLedgerCache();
-		 const rebuilt=readGoalLedgerForGoal(f,f.goal.id); assert.deepEqual(rebuilt.events,full.events); assert.deepEqual(rebuilt.latestAuditorResult,full.latestAuditorResult);
-		 assert.deepEqual(goalOracleState(f,f.goal.id,"fp"),oracle);
+			const rebuilt=readGoalLedgerForGoal(f,f.goal.id); assert.deepEqual(rebuilt.events,full.events); assert.deepEqual(rebuilt.latestAuditorResult,full.latestAuditorResult);
+			assert.deepEqual(goalOracleState(f,f.goal.id,"fp"),oracle);
 		}
 	} finally {f.cleanup();invalidateGoalLedgerCache();}
 });

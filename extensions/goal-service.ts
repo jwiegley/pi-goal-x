@@ -4,7 +4,7 @@ import type { GoalLedgerEvent } from "./goal-ledger.ts";
 import {
 	GOALS_DIR,
 	archiveGoalFile,
- readActiveGoalPoolView,
+	readActiveGoalPoolView,
 	resolveGoalPath,
 	sanitizeGoalPaths,
 	writeActiveGoalFile,

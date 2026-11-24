@@ -26,10 +26,10 @@ export function newGoalLedgerIndex(): GoalLedgerIndex {
 }
 const lifecycleEvents = new Set(["goal_created", "goal_paused", "goal_resumed", "goal_blocked", "goal_budget_limited", "goal_completed", "goal_aborted", "goal_archived"]);
 export function indexLedgerEvent(index: Map<string, GoalLedgerIndex>, event: GoalLedgerEvent): void {
- if (!("goalId" in event)) return;
- let goal = index.get(event.goalId);
- if (!goal) { goal = newGoalLedgerIndex(); index.set(event.goalId, goal); }
- indexGoalLedgerEvent(goal, event);
+	if (!("goalId" in event)) return;
+	let goal = index.get(event.goalId);
+	if (!goal) { goal = newGoalLedgerIndex(); index.set(event.goalId, goal); }
+	indexGoalLedgerEvent(goal, event);
 }
 /**
  * Fold one event of a goal into that goal's working set. Callers that keep
@@ -37,7 +37,7 @@ export function indexLedgerEvent(index: Map<string, GoalLedgerIndex>, event: Goa
  * its recent and activity limits instead of growing with fingerprints.
  */
 export function indexGoalLedgerEvent(goal: GoalLedgerIndex, event: GoalLedgerEvent, options: { oracle?: boolean } = {}): void {
- goal.recent.push(event);
+	goal.recent.push(event);
 	if (goal.recent.length > GOAL_INDEX_RECENT_LIMIT) goal.recent.shift();
 	if (lifecycleEvents.has(event.type)) goal.lifecycle = event;
 	if (event.type === "audit_started" || event.type === "audit_result" || event.type === "audit_skipped") {
