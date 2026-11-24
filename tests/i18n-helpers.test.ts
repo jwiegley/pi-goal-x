@@ -23,7 +23,7 @@ registerLocale("xh", {
 	"Autonomous runs: {used}/{limit}.": "XH runs {used}/{limit}",
 });
 
-const healthy = { healthy: true, malformedGoalFiles: [], malformedLedgerLines: 0, staleLocks: [], orphanedSnapshotGoals: [] } as unknown as Parameters<typeof formatRecoveryReport>[0];
+const healthy = { healthy: true, malformedGoalFiles: [], malformedLedgerLines: 0, staleLocks: [], abandonedGates: [], orphanedSnapshotGoals: [], completedActiveGoals: [], pendingRecoveryLedger: [] } as unknown as Parameters<typeof formatRecoveryReport>[0];
 
 test("helpers return the original English text", () => {
 	assert.equal(clearGoalCommandMessage({ archived: true }), "Goal cleared and archived.");

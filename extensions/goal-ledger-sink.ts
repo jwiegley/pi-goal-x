@@ -18,3 +18,8 @@ export function appendLedgerEventsBestEffort(ctx: GoalServiceContext, events: Go
 	});
 	return false;
 }
+
+/** Recovery needs the exact append result before removing its pending marker. */
+export function appendRecoveryLedgerEvents(ctx: GoalServiceContext, events: GoalLedgerEvent[]) {
+	return appendGoalEvents(ctx, events);
+}

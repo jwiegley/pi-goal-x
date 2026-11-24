@@ -35,7 +35,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { GOALS_DIR, isSafeActivePath, isSafeArchivedPath } from "./storage/goal-paths.ts";
-import { appendGoalEvents, readGoalLedger, readGoalLedgerForGoal, type GoalLedgerEvent } from "./goal-ledger.ts";
+import { readGoalLedger, readGoalLedgerForGoal, type GoalLedgerEvent } from "./goal-ledger.ts";
+import { appendRecoveryLedgerEvents } from "./goal-ledger-sink.ts";
 import type { GoalRecord } from "./goal-record.ts";
 import {
 	acquireGoalLock,
@@ -641,7 +642,7 @@ export async function runRecoveryRepair(
 				if (facts.completedAt === undefined) events.push({ type: "goal_completed", goalId: entry.goalId, archivePath: entry.archivePath, at: entry.completedAt });
 				if (facts.archivedArchivePath !== entry.archivePath) events.push({ type: "goal_archived", goalId: entry.goalId, archivePath: entry.archivePath, at: entry.archivedAt });
 				stage = "append";
-				const ledger = appendGoalEvents(ctx, events);
+				const ledger = appendRecoveryLedgerEvents(ctx, events);
 				if (!ledger.ok) {
 					fail("append_recovery_ledger", stage, entry.goalId, ledger.error);
 					return;
