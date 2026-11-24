@@ -86,6 +86,9 @@ const result = spawnSync(
 		"--import", pathToFileURL(join(projectRoot, "scripts", "test-adapter-hooks.mjs")).href,
 		"--experimental-strip-types",
 		"--test",
+		// SDK suites launch their own workers; bound file-level parallelism to avoid
+		// starving time-sensitive integration and lock-contention tests on large hosts.
+		"--test-concurrency=4",
 		...testFiles,
 	],
 	{ cwd: projectRoot, stdio: "inherit" },
