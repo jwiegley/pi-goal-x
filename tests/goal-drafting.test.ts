@@ -1423,7 +1423,7 @@ test("a draft hides the unfocused reminder", async () => {
 // ── Router level for a new goal's drafting prompt ─────────────────────────
 
 /** The drafting prompt /COMMAND sends with MODEL selected and Pi idle or not. */
-async function draftPromptFor(command: string, model: unknown, idle = true): Promise<string> {
+async function draftPromptFor(command: string, model: unknown, idle = true, topic = "Ship a small feature") {
 	const cwd = tempDir("goal-draft-router-");
 	mkdirSync(path.join(cwd, ".pi", "goals", "archived"), { recursive: true });
 	try {
@@ -1432,9 +1432,10 @@ async function draftPromptFor(command: string, model: unknown, idle = true): Pro
 		const ctx = h.ctx as unknown as { model: unknown; isIdle: () => boolean };
 		ctx.model = model;
 		ctx.isIdle = () => idle;
-		await h.commands.get(command)!.handler("Ship a small feature", h.ctx);
+		await h.commands.get(command)!.handler(topic, h.ctx);
 		assert.equal(h.messages.length, 1, "one drafting prompt is sent");
-		return h.messages[0]!;
+		const entry = h.entries().find(e => e.customType === DRAFT_ENTRY);
+		return { prompt: h.messages[0]!, seed: (entry?.data as { seed: string } | undefined)?.seed };
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -1442,27 +1443,40 @@ async function draftPromptFor(command: string, model: unknown, idle = true): Pro
 
 const ROUTER_AUTO = { provider: "smart-router", id: "auto" };
 
-test("/goal and /sisyphus on smart-router/auto ask the router for the SUPER level", async () => {
+test("new drafts on every smart-router model request SUPER as the final token", async () => {
 	for (const command of ["goal", "sisyphus"]) {
-		const prompt = await draftPromptFor(command, ROUTER_AUTO);
-		assert.match(prompt, /^\[GOAL CONFIRMATION focus=/, command);
-		// pi-smart-router reads a level tag only as the message's last whitespace-separated token.
-		assert.ok(prompt.endsWith("\n#super"), `${command}: the prompt must end with the router's tag`);
-		assert.equal(prompt.split("#super").length, 2, `${command}: exactly one tag`);
-	}
-});
-
-test("a drafting prompt carries no router tag where no router would remove it", async () => {
-	for (const model of [undefined, { provider: "smart-router", id: "local" }, { provider: "openai-codex", id: "auto" }, { provider: "omlx-hera", id: "DeepSeek" }]) {
-		for (const command of ["goal", "sisyphus"]) {
-			const prompt = await draftPromptFor(command, model);
-			assert.ok(!prompt.includes("#super"), `${command} on ${JSON.stringify(model)}`);
+		for (const id of ["auto", "work", "personal", "local"]) {
+			for (const suffix of ["", "\n#super  "]) {
+				const { prompt, seed } = await draftPromptFor(command, { provider: "smart-router", id }, true, "Review the plan" + suffix);
+				assert.match(prompt, /^\[GOAL CONFIRMATION focus=/);
+				assert.equal(seed, "Review the plan");
+				assert.ok(prompt.endsWith("\n#super"), `${command} on ${id}`);
+				assert.equal(prompt.split("#super").length, 2, "tag appears once, never inside the quoted topic");
+			}
 		}
 	}
 });
 
-test("a drafting prompt sent while Pi is busy carries no router tag", async () => {
-	// The router plans levels only for an idle input: a steer's tag would be removed with a warning.
-	const prompt = await draftPromptFor("goal", ROUTER_AUTO, false);
-	assert.ok(!prompt.includes("#super"));
+test("a #super mention inside the topic is not a trailing level tag", async () => {
+	const topic = "Explain #super in the manual, including word#super";
+	const { prompt, seed } = await draftPromptFor("goal", ROUTER_AUTO, true, topic);
+	assert.equal(seed, topic);
+	assert.ok(prompt.includes(topic));
+	assert.ok(prompt.endsWith("\n#super"));
+});
+
+test("a non-router draft preserves the literal topic without adding a tag", async () => {
+	for (const model of [undefined, { provider: "openai-codex", id: "auto" }, { provider: "omlx-hera", id: "DeepSeek" }]) {
+		const topic = "Document #super";
+		const { prompt, seed } = await draftPromptFor("goal", model, true, topic);
+		assert.equal(seed, topic);
+		assert.ok(prompt.includes(topic));
+		assert.ok(!prompt.endsWith("#super"));
+	}
+});
+
+test("a router draft sent as a steer does not submit or leak a level tag", async () => {
+	const { prompt, seed } = await draftPromptFor("goal", ROUTER_AUTO, false, "Revise this #SUPER");
+	assert.equal(seed, "Revise this");
+	assert.ok(!/#super/i.test(prompt));
 });

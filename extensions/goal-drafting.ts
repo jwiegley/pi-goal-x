@@ -158,25 +158,11 @@ function tweakDraftPrompt(topic: string, targetGoal: GoalRecord | undefined): st
 		"User request:", topic || "(ask what they want to change)",
 	].join("\n");
 }
-/**
- * pi-smart-router's level tag for a new goal's drafting prompt: drafting a goal contract is the
- * session's planning work, so /goal and /sisyphus ask the router for its SUPER level (John,
- * 2026-11-23). The router reads a tag only as the last token of an idle input, removes it before
- * the model sees the message, and remembers the level for the runs that follow. The tag is added
- * only where that router will remove it: smart-router/auto selected and Pi idle. On any other
- * model it would reach the model as text, on smart-router/local a level without local models is
- * refused, and a steer's tag is dropped with a warning. A tweak of an existing goal is not tagged.
- */
+// pi-smart-router consumes a standalone level tag at the end of an idle input,
+// not inside the quoted topic. It owns tier availability and scope restrictions.
 const ROUTER_SUPER_TAG = "#super";
 
-function routerLevelTag(ctx: ExtensionContext, mode: GoalDraftMode): string {
-	if (mode === "tweak" || !ctx.isIdle()) return "";
-	const model = ctx.model as { provider?: unknown; id?: unknown } | undefined;
-	return model?.provider === "smart-router" && model.id === "auto" ? "\n" + ROUTER_SUPER_TAG : "";
-}
-
 export async function startGoalDrafting(core: GoalDraftingCore, ctx: ExtensionContext, mode: GoalDraftMode, topic: string, targetGoal?: GoalRecord): Promise<void> {
-	const trimmed = topic.trim();
 	const label = mode === "sisyphus" ? t("Sisyphus draft") : mode === "tweak" ? t("Goal tweak draft") : t("Goal draft");
 	// A second draft must never silently discard the first.
 	if (activeDraft(core)) {
@@ -194,6 +180,9 @@ export async function startGoalDrafting(core: GoalDraftingCore, ctx: ExtensionCo
 		ctx.ui.notify(t("Replacing the active draft with a new {label}.", { label: label.toLowerCase() }), "warning");
 		clearGoalDrafting(core, ctx);
 	}
+	const routedDraft = mode !== "tweak" && ctx.model?.provider === "smart-router";
+	const topicText = topic.trim();
+	const trimmed = routedDraft ? topicText.replace(/(?:^|\s)#super$/i, "").trimEnd() : topicText;
 	// A tweak confirmation defaults to the target goal's persisted per-goal
 	// auditor setting (skipAuditor); the global `auditor disabled` setting is
 	// only the fallback when the goal has no per-goal value. Confirming a
@@ -208,9 +197,11 @@ export async function startGoalDrafting(core: GoalDraftingCore, ctx: ExtensionCo
 	ctx.ui.notify(trimmed
 		? t("{label} started: {topic}. The agent will clarify, propose a goal and tasks where useful, then ask you to confirm.", { label, topic: trimmed.slice(0, 60) })
 		: t("{label} started. The agent will clarify, propose a goal and tasks where useful, then ask you to confirm.", { label }), "info");
-	const prompt = mode === "tweak" ? tweakDraftPrompt(trimmed, targetGoal) : goalDraftingPrompt(trimmed, mode, core.loadedCommands) + routerLevelTag(ctx, mode);
+	const idle = ctx.isIdle();
+	const prompt = mode === "tweak" ? tweakDraftPrompt(trimmed, targetGoal) : goalDraftingPrompt(trimmed, mode, core.loadedCommands);
+	const tag = routedDraft && idle ? `\n${ROUTER_SUPER_TAG}` : "";
 	try {
-		core.pi.sendUserMessage(prompt, { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
+		core.pi.sendUserMessage(prompt + tag, { deliverAs: idle ? "followUp" : "steer" });
 	} catch (err) {
 		clearGoalDrafting(core, ctx);
 		ctx.ui.notify(t("Could not start {label}: {error}", { label: label.toLowerCase(), error: err instanceof Error ? err.message : String(err) }), "error");

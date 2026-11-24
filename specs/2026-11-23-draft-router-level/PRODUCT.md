@@ -5,18 +5,21 @@ always want the prompt this produces to be handled using the super tier."
 
 ## Behaviour
 
-- `/goal` and `/sisyphus` end their drafting prompt with a last line `#super` when the selected
-  model is `smart-router/auto` and Pi is idle. pi-smart-router reads a level tag as the last token
-  of an idle input, removes it before the model sees the message, and plans the run at SUPER.
-- The router takes the level of the last three planned prompts for runs that start without a
-  prompt, so the goal's continuations after the draft is confirmed stay at SUPER until three
-  lighter prompts have been planned.
-- No tag is added in any other case, because nothing would remove it or it would do harm:
-  - another model, picked by hand or a router's other model: the tag would reach the model as text;
-  - `smart-router/local`: the router refuses a tagged level that has no local models;
-  - Pi busy (the prompt is delivered as a steer): the router drops a steer's tag with a warning;
-  - `/goal-tweak`, which revises an existing goal: not asked for.
-- `/goal-direct` and `/sisyphus-direct` send no prompt, so there is nothing to tag.
+- When Pi is idle and a `smart-router` model is selected, `/goal` and `/sisyphus` end their
+  generated drafting prompt with one `#super` token. This includes `auto`, `work`, `personal`,
+  and `local`. An explicit trailing `#super` in the command is routing metadata: it is removed
+  from the topic before Goal X stores or quotes it. A mention inside the topic remains text.
+- The router resolves the request within the selected model and session scope. If SUPER is
+  usable, it handles the draft. If the roster defines no SUPER tier there, the router silently
+  uses the highest usable tier, or the ordinary local selection on an untiered local roster.
+- If the roster defines SUPER but cannot use it, the router checks lower tiers in descending
+  order. An advisory identifies the selected tier and why SUPER was unavailable. If no tier
+  can serve the draft, try the selected scope's unranked fallback chain last. Name the spare's
+  role, not a tier. Local-only routing has no such chain. If no permitted route remains, return
+  the normal refusal. An ordinary `#super` request outside a draft keeps its normal semantics.
+- Pi cannot replan an active run for a steer. Goal X does not append a routing tag to a steer,
+  to a `/goal-tweak` prompt, or to a message for a non-router model. `/goal-direct` and
+  `/sisyphus-direct` send no drafting prompt. Goal execution after drafting is unchanged.
 
 ## Not done
 

@@ -6,7 +6,7 @@ All notable changes to pi-goal-x are documented here.
 
 ### Changed
 
-- `/goal` and `/sisyphus` ask pi-smart-router for its SUPER level: on `smart-router/auto`, with Pi idle, the drafting prompt ends with the router's `#super` tag, which the router removes before the model sees it. Other models, `smart-router/local`, a busy session and `/goal-tweak` are unchanged.
+- New `/goal` and `/sisyphus` drafts request SUPER on all `smart-router` models. A trailing `#super` is a routing instruction, not part of the goal topic. If SUPER is absent, the router silently selects the highest usable tier; if configured but unusable, it names the fallback and the reason. A busy steer gets no tag. Other providers, direct commands, `/goal-tweak`, and goal execution are unchanged.
 
 ### Fixed
 
